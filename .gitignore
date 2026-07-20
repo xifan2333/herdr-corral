@@ -1,0 +1,23 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+*~
+*.swp
+.idea/
+.vscode/
+*.code-workspace
+
+# Language toolchains (per-plugin)
+node_modules/
+dist/
+build/
+target/
+*.log
+.env
+.env.*
+!.env.example
+
+# Plugin local state / caches (if ever written into the tree)
+.cache/
+tmp/
+*.tmp
