@@ -12,6 +12,7 @@
 herdr-workbench/
   plugins/
     starter/          # 最小可运行插件（Bash）
+    workbench/        # VS Code 风 workbench：Explorer / SCM / GitHub
   README.md
 ```
 
