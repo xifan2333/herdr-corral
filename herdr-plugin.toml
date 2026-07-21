@@ -5,12 +5,23 @@ min_herdr_version = "0.7.0"
 description = "VS Code-style terminal workbench for Herdr"
 platforms = ["linux", "macos"]
 
-# GitHub `plugin install` builds the Rust binary here. `plugin link` (local dev)
-# does NOT run build — build it yourself with `cargo build --release`.
+# GitHub `plugin install` builds the binary. Local `plugin link` does not —
+# run `cargo build --release` yourself while developing.
 [[build]]
 command = ["cargo", "build", "--release"]
 
-# No user-facing entrypoints yet. `corral::theme` is an internal color module:
-# it resolves Herdr's current UI theme palette deterministically (ported from
-# Herdr's own theme tables, read from its config.toml) so upcoming components
-# share one color source. Actions / panes get added here as those components land.
+# Single host pane. Left/right containers live *inside* this process
+# (same shape as herdr-file-viewer), not as separate Herdr panes.
+[[panes]]
+id = "workbench"
+title = "Corral"
+placement = "split"
+command = ["./target/release/corral"]
+
+# Summon the host pane (launch / focus / toggle-close).
+[[actions]]
+id = "open"
+title = "Open Corral"
+description = "Open the Corral workbench (left + right containers) in a split pane."
+contexts = ["workspace"]
+command = ["bash", "scripts/open-corral.sh"]
