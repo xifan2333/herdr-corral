@@ -1,9 +1,9 @@
 //! In-process two-column layout: left container + right container.
 //!
-//! Like herdr-file-viewer, Corral is a **single Herdr pane**. The left/right
-//! containers are regions drawn inside that one ratatui process — not separate
-//! Herdr panes. Future features (Explorer / SCM / GitHub) plug into these
-//! regions; they do not open their own host panes.
+//! Corral is a **single host process**. The left/right containers are regions
+//! drawn inside that process — not separate panes. Features plug into these
+//! regions and supply their own titles/content; the shell does not hardcode
+//! feature names.
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 
@@ -22,13 +22,17 @@ impl Focus {
             Focus::Right => Focus::Left,
         }
     }
+}
 
-    pub fn label(self) -> &'static str {
-        match self {
-            Focus::Left => "left",
-            Focus::Right => "right",
-        }
-    }
+/// What a feature mounts into a container for this frame.
+///
+/// Titles/body come from the feature; the shell draws the frame only.
+#[derive(Clone, Debug, Default)]
+pub struct PanelView {
+    /// Optional title drawn on the border. Empty = no title.
+    pub title: Option<String>,
+    /// Placeholder body until real views land.
+    pub body: String,
 }
 
 /// Geometry for the two containers inside the host pane.

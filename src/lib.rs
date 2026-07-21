@@ -16,7 +16,7 @@ pub mod layout;
 pub mod theme;
 
 pub use host::{LaunchContext, Mode};
-pub use layout::{Containers, Focus};
+pub use layout::{Containers, Focus, PanelView};
 pub use theme::Palette;
 
 /// Entry point invoked by the binary (plugin pane or standalone).

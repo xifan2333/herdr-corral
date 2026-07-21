@@ -3,9 +3,12 @@
 //! Works as a Herdr plugin pane *or* a standalone terminal binary. Host-specific
 //! details come from [`crate::host::LaunchContext`]; the shell itself does not
 //! require Herdr.
+//!
+//! Panel titles/content are supplied by features via [`PanelView`]. The shell
+//! does not hardcode "left"/"right" labels.
 
 use crate::host::LaunchContext;
-use crate::layout::{self, Focus};
+use crate::layout::{self, Focus, PanelView};
 use crate::theme::Palette;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
@@ -14,7 +17,7 @@ use crossterm::terminal::{
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::Span;
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::{Frame, Terminal};
 use std::io::{self, Stdout};
@@ -25,7 +28,6 @@ const LEFT_PCT: u16 = 30;
 
 /// Run the host TUI until the user quits.
 pub fn run(ctx: LaunchContext) -> io::Result<()> {
-    // Best-effort: root relative paths / future views at the launch cwd.
     let _ = std::env::set_current_dir(&ctx.cwd);
 
     let palette = Palette::resolve();
@@ -43,7 +45,17 @@ fn event_loop(
     let mut focus = Focus::Left;
 
     loop {
-        terminal.draw(|frame| draw(frame, palette, focus, ctx))?;
+        // Features will supply these later; empty title for now.
+        let left = PanelView {
+            title: None,
+            body: String::new(),
+        };
+        let right = PanelView {
+            title: None,
+            body: String::new(),
+        };
+
+        terminal.draw(|frame| draw(frame, palette, focus, &left, &right, ctx))?;
 
         if !event::poll(Duration::from_millis(100))? {
             continue;
@@ -68,43 +80,39 @@ fn event_loop(
     Ok(())
 }
 
-fn draw(frame: &mut Frame, palette: &Palette, focus: Focus, ctx: &LaunchContext) {
+fn draw(
+    frame: &mut Frame,
+    palette: &Palette,
+    focus: Focus,
+    left: &PanelView,
+    right: &PanelView,
+    ctx: &LaunchContext,
+) {
     let area = frame.area();
     let containers = layout::split(area, LEFT_PCT);
 
-    let left_body = format!(
-        "sidebar container\n(future: Explorer / SCM / GitHub)\n\ncwd: {}",
-        ctx.cwd.display()
-    );
-    let right_body = "main container\n(future views mount here)";
-
-    draw_container(
+    draw_panel(
         frame,
         containers.left,
-        " left ",
-        &left_body,
+        left,
         focus == Focus::Left,
         palette,
     );
-    draw_container(
+    draw_panel(
         frame,
         containers.right,
-        " right ",
-        right_body,
+        right,
         focus == Focus::Right,
         palette,
     );
 
+    // Status line: plain text only, no background block.
     let hint = format!(
-        " corral  mode={}  theme={}  focus={}  Tab focus  h/l  q quit ",
+        " corral  {}  {}  q quit ",
         ctx.mode.label(),
-        palette.name,
-        focus.label()
+        palette.name
     );
-    let bar = Paragraph::new(Line::from(Span::styled(
-        hint,
-        Style::default().fg(palette.subtext0).bg(palette.surface_dim),
-    )));
+    let bar = Paragraph::new(hint).style(Style::default().fg(palette.subtext0));
     let bar_area = ratatui::layout::Rect {
         x: area.x,
         y: area.y.saturating_add(area.height.saturating_sub(1)),
@@ -114,11 +122,10 @@ fn draw(frame: &mut Frame, palette: &Palette, focus: Focus, ctx: &LaunchContext)
     frame.render_widget(bar, bar_area);
 }
 
-fn draw_container(
+fn draw_panel(
     frame: &mut Frame,
     area: ratatui::layout::Rect,
-    title: &str,
-    body: &str,
+    view: &PanelView,
     focused: bool,
     palette: &Palette,
 ) {
@@ -138,25 +145,30 @@ fn draw_container(
     } else {
         Style::default().fg(palette.overlay0)
     };
-    let title_style = if focused {
-        Style::default()
-            .fg(palette.accent)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(palette.subtext0)
-    };
 
-    let block = Block::default()
+    let mut block = Block::default()
         .borders(Borders::ALL)
         .border_style(border)
-        .title(Span::styled(title, title_style))
         .style(Style::default().bg(palette.panel_bg).fg(palette.text));
+
+    if let Some(title) = view.title.as_deref().filter(|t| !t.is_empty()) {
+        let title_style = if focused {
+            Style::default()
+                .fg(palette.accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(palette.subtext0)
+        };
+        block = block.title(Span::styled(format!(" {title} "), title_style));
+    }
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let body = Paragraph::new(body).style(Style::default().fg(palette.subtext0));
-    frame.render_widget(body, inner);
+    if !view.body.is_empty() {
+        let body = Paragraph::new(view.body.as_str()).style(Style::default().fg(palette.subtext0));
+        frame.render_widget(body, inner);
+    }
 }
 
 fn setup() -> io::Result<Terminal<CrosstermBackend<Stdout>>> {
