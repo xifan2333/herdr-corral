@@ -3,17 +3,19 @@
 //! Shape (aligned with herdr-sidebar):
 //! - **one left-docked pane** hosts Explorer / SCM / GitHub
 //! - feature switch is in-process (top activity icons)
-//! - file/diff/PR detail opens later as a **separate preview pane**
+//! - behaviour is configured in shell (`config.sh`: binds + functions)
 //! - also runs standalone (`corral`) without Herdr
 //!
 //! Modules:
 //! - [`host`] — plugin vs standalone launch context
-//! - [`herdr`] — host CLI / future RPC (`herdr::cli`)
+//! - [`config`] — `config.sh` binds + shell actions
+//! - [`herdr`] — host CLI / future RPC
 //! - [`ui`] — palette, icons, layout, activity strip
 //! - [`feature`] — Explorer / SCM / GitHub + [`feature::FeatureView`]
 //! - [`app`] — sidebar event loop / key routing
 
 pub mod app;
+pub mod config;
 pub mod feature;
 pub mod herdr;
 pub mod host;

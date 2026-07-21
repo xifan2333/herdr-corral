@@ -10,8 +10,10 @@ mod view;
 
 pub use view::{FeatureView, KeyOutcome};
 
+use crate::config::Config;
 use explorer::ExplorerView;
 use placeholder::PlaceholderView;
+use std::sync::Arc;
 
 /// A sidebar feature (activity-bar item).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -33,7 +35,6 @@ impl Feature {
         }
     }
 
-    /// Short id for status / keys.
     pub fn id(self) -> &'static str {
         match self {
             Feature::Explorer => "explorer",
@@ -42,13 +43,12 @@ impl Feature {
         }
     }
 
-    /// Activity-bar glyph. Prefer Nerd Font; plain ASCII when unavailable.
     pub fn icon(self, nerd_font: bool) -> &'static str {
         if nerd_font {
             match self {
-                Feature::Explorer => "\u{f07b}", // nf-fa-folder
-                Feature::Scm => "\u{f126}",      // nf-fa-code_fork
-                Feature::GitHub => "\u{f09b}",   // nf-fa-github
+                Feature::Explorer => "\u{f07b}",
+                Feature::Scm => "\u{f126}",
+                Feature::GitHub => "\u{f09b}",
             }
         } else {
             match self {
@@ -59,12 +59,10 @@ impl Feature {
         }
     }
 
-    /// True when the Nerd glyph is typically double-width (needs a slack cell).
     pub fn icon_double_width(self, nerd_font: bool) -> bool {
         nerd_font
     }
 
-    /// Digit shortcut: `1` / `2` / `3` (shell-owned feature switch).
     pub fn from_digit(c: char) -> Option<Feature> {
         match c {
             '1' => Some(Feature::Explorer),
@@ -95,9 +93,9 @@ pub struct Views {
 }
 
 impl Views {
-    pub fn new(cwd: &std::path::Path, nerd_font: bool) -> Self {
+    pub fn new(cwd: &std::path::Path, nerd_font: bool, config: Arc<Config>) -> Self {
         Self {
-            explorer: ExplorerView::new(cwd.to_path_buf(), nerd_font),
+            explorer: ExplorerView::new(cwd.to_path_buf(), nerd_font, config),
             scm: PlaceholderView::new(Feature::Scm, "git changes go here".into()),
             github: PlaceholderView::new(Feature::GitHub, "issues / PRs go here".into()),
         }

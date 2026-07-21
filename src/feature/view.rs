@@ -1,20 +1,27 @@
 //! Mount contract for a sidebar feature body.
 //!
 //! The shell owns activity switching (`1`/`2`/`3`, icon clicks) and terminal
-//! setup. Each feature owns its body keys (`j`/`k`, …) and drawing.
+//! setup. Each feature owns its body keys and drawing. External behaviour
+//! goes through shell functions in `config.sh` via [`KeyOutcome::Shell`].
 
 use crate::ui::Palette;
 use crossterm::event::{KeyCode, KeyModifiers, MouseEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
+use std::path::PathBuf;
 
-/// Result of handing a key to the active feature body.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Result of handing a key/mouse event to the active feature body.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum KeyOutcome {
-    /// Feature handled the key.
+    /// Feature handled the key in-process.
     Handled,
-    /// Feature does not care; shell may ignore (no global j/k feature cycle).
+    /// Feature does not care.
     Ignored,
+    /// Run a shell function from `config.sh` (TUI should suspend first).
+    Shell {
+        action: String,
+        file: Option<PathBuf>,
+    },
 }
 
 /// One feature's body UI (Explorer tree, SCM list, …).

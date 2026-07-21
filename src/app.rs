@@ -9,6 +9,7 @@
 //! - **shell**: `q`, `Ctrl-C`, `1`/`2`/`3`, activity icon clicks
 //! - **active feature body**: everything else (`j`/`k`, …) via [`FeatureView`]
 
+use crate::config::Config;
 use crate::feature::{Feature, KeyOutcome, Views};
 use crate::herdr;
 use crate::host::LaunchContext;
@@ -24,21 +25,25 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use ratatui::{Frame, Terminal};
 use std::io::{self, Stdout};
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 struct State {
     feature: Feature,
     views: Views,
+    config: Arc<Config>,
     /// Last label pushed to Herdr (avoid spamming rename every frame).
     labeled_as: Option<&'static str>,
     nav_hits: Vec<(Feature, Rect)>,
 }
 
 impl State {
-    fn new(ctx: &LaunchContext, nerd_font: bool) -> Self {
+    fn new(ctx: &LaunchContext, nerd_font: bool, config: Arc<Config>) -> Self {
         Self {
             feature: Feature::Explorer,
-            views: Views::new(&ctx.cwd, nerd_font),
+            views: Views::new(&ctx.cwd, nerd_font, Arc::clone(&config)),
+            config,
             labeled_as: None,
             nav_hits: Vec::new(),
         }
@@ -51,9 +56,10 @@ pub fn run(ctx: LaunchContext) -> io::Result<()> {
 
     let palette = Palette::resolve();
     let use_nf = ui::detect_nerd_font().should_use_icons();
+    let config = Arc::new(Config::load());
     // TermGuard restores the terminal on Drop (normal return *and* panic).
     let mut term = TermGuard::enter()?;
-    event_loop(term.terminal(), &palette, use_nf, &ctx)
+    event_loop(term.terminal(), &palette, use_nf, &ctx, config)
 }
 
 fn event_loop(
@@ -61,8 +67,9 @@ fn event_loop(
     palette: &Palette,
     use_nf: bool,
     ctx: &LaunchContext,
+    config: Arc<Config>,
 ) -> io::Result<()> {
-    let mut state = State::new(ctx, use_nf);
+    let mut state = State::new(ctx, use_nf, config);
 
     // Initial Herdr border title = active feature.
     sync_pane_label(&mut state, ctx);
@@ -81,8 +88,12 @@ fn event_loop(
         match event::read()? {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
                 let before = state.feature;
-                if handle_key(&mut state, key.code, key.modifiers) {
-                    break;
+                match handle_key(&mut state, key.code, key.modifiers) {
+                    KeyHandle::Quit => break,
+                    KeyHandle::Continue => {}
+                    KeyHandle::Shell { action, file } => {
+                        run_shell_action(terminal, &state, &action, file.as_deref())?;
+                    }
                 }
                 if state.feature != before {
                     state.views.get_mut(state.feature).on_activate();
@@ -93,20 +104,60 @@ fn event_loop(
                 if matches!(m.kind, MouseEventKind::Down(MouseButton::Left)) {
                     let before = state.feature;
                     if !handle_activity_click(&mut state, m.column, m.row) {
-                        // Not an activity hit — body may handle later.
-                        let _ = state.views.get_mut(state.feature).on_mouse(m);
+                        if let KeyOutcome::Shell { action, file } =
+                            state.views.get_mut(state.feature).on_mouse(m)
+                        {
+                            run_shell_action(terminal, &state, &action, file.as_deref())?;
+                        }
                     }
                     if state.feature != before {
                         state.views.get_mut(state.feature).on_activate();
                         sync_pane_label(&mut state, ctx);
                     }
-                } else {
-                    let _ = state.views.get_mut(state.feature).on_mouse(m);
+                } else if let KeyOutcome::Shell { action, file } =
+                    state.views.get_mut(state.feature).on_mouse(m)
+                {
+                    run_shell_action(terminal, &state, &action, file.as_deref())?;
                 }
             }
             _ => {}
         }
     }
+    Ok(())
+}
+
+enum KeyHandle {
+    Quit,
+    Continue,
+    Shell { action: String, file: Option<PathBuf> },
+}
+
+fn run_shell_action(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    state: &State,
+    action: &str,
+    file: Option<&std::path::Path>,
+) -> io::Result<()> {
+    // Leave alt-screen so $EDITOR / herdr pane can use a normal TTY.
+    let _ = disable_raw_mode();
+    let _ = execute!(
+        terminal.backend_mut(),
+        crossterm::event::DisableMouseCapture,
+        LeaveAlternateScreen
+    );
+    let _ = terminal.show_cursor();
+
+    let _ok = state.config.run_shell(action, file, &[]);
+
+    // Re-enter TUI.
+    enable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        EnterAlternateScreen,
+        crossterm::event::EnableMouseCapture
+    )?;
+    let _ = terminal.hide_cursor();
+    terminal.clear()?;
     Ok(())
 }
 
@@ -123,30 +174,28 @@ fn sync_pane_label(state: &mut State, ctx: &LaunchContext) {
 }
 
 /// Shell keys first; everything else goes to the active feature body.
-/// Returns true if the event loop should quit.
-fn handle_key(state: &mut State, code: KeyCode, mods: KeyModifiers) -> bool {
+fn handle_key(state: &mut State, code: KeyCode, mods: KeyModifiers) -> KeyHandle {
     // --- shell chords (never stolen by features) ---
     match code {
-        KeyCode::Char('q') => return true,
-        KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => return true,
-        // Esc reserved for closing preview later; not quit.
-        KeyCode::Esc => return false,
+        KeyCode::Char('q') => return KeyHandle::Quit,
+        KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => return KeyHandle::Quit,
+        KeyCode::Esc => return KeyHandle::Continue,
 
-        // Feature switch: digits only (Explorer needs j/k for lists).
+        // Feature switch: digits only.
         KeyCode::Char(c @ '1'..='3') => {
             if let Some(f) = Feature::from_digit(c) {
                 state.feature = f;
             }
-            return false;
+            return KeyHandle::Continue;
         }
         _ => {}
     }
 
     // --- body ---
     match state.views.get_mut(state.feature).on_key(code, mods) {
-        KeyOutcome::Handled | KeyOutcome::Ignored => {}
+        KeyOutcome::Handled | KeyOutcome::Ignored => KeyHandle::Continue,
+        KeyOutcome::Shell { action, file } => KeyHandle::Shell { action, file },
     }
-    false
 }
 
 /// Returns true if the click hit the activity strip (feature switch).

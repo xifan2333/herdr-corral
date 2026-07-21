@@ -1,6 +1,11 @@
 //! Explorer: expandable file tree rooted at the launch cwd.
+//!
+//! Navigation keys and “open file” come from [`crate::config::Config`]:
+//! internal actions stay in-process; other actions run as shell functions
+//! from the user’s `config.sh`.
 
 use super::view::{FeatureView, KeyOutcome};
+use crate::config::{self, Config};
 use crate::ui::{self, Palette};
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::Frame;
@@ -12,6 +17,7 @@ use std::cell::Cell;
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 #[derive(Clone, Debug)]
 struct Entry {
@@ -27,15 +33,15 @@ pub struct ExplorerView {
     rows: Vec<Entry>,
     selected: usize,
     scroll: usize,
-    /// Last-drawn body top row (pane-local / absolute screen row from frame).
     body_top: Cell<u16>,
     body_height: Cell<u16>,
     nerd_font: bool,
     error: Option<String>,
+    config: Arc<Config>,
 }
 
 impl ExplorerView {
-    pub fn new(root: PathBuf, nerd_font: bool) -> Self {
+    pub fn new(root: PathBuf, nerd_font: bool, config: Arc<Config>) -> Self {
         let root = root.canonicalize().unwrap_or(root);
         let mut view = Self {
             root: root.clone(),
@@ -47,6 +53,7 @@ impl ExplorerView {
             body_height: Cell::new(0),
             nerd_font,
             error: None,
+            config,
         };
         view.rebuild();
         view
@@ -141,20 +148,29 @@ impl ExplorerView {
         self.ensure_visible();
     }
 
-    fn toggle_or_open(&mut self) {
+    fn toggle_or_open(&mut self) -> KeyOutcome {
         let Some(entry) = self.rows.get(self.selected).cloned() else {
-            return;
+            return KeyOutcome::Handled;
         };
-        if !entry.is_dir {
-            // File preview lands later.
-            return;
-        }
-        if self.expanded.contains(&entry.path) {
-            self.expanded.remove(&entry.path);
+        if entry.is_dir {
+            if self.expanded.contains(&entry.path) {
+                self.expanded.remove(&entry.path);
+            } else {
+                self.expanded.insert(entry.path);
+            }
+            self.rebuild();
+            KeyOutcome::Handled
         } else {
-            self.expanded.insert(entry.path);
+            self.run_open(&entry.path)
         }
-        self.rebuild();
+    }
+
+    fn run_open(&mut self, path: &Path) -> KeyOutcome {
+        // Shell actions may take the TTY; shell suspends the terminal first.
+        KeyOutcome::Shell {
+            action: config::internal::OPEN.into(),
+            file: Some(path.to_path_buf()),
+        }
     }
 
     fn collapse_or_parent(&mut self) {
@@ -199,6 +215,56 @@ impl ExplorerView {
         let idx = self.scroll + usize::from(row - top);
         (idx < self.rows.len()).then_some(idx)
     }
+
+    fn dispatch_action(&mut self, action: &str) -> KeyOutcome {
+        match action {
+            a if a == config::internal::UP => {
+                self.move_sel(-1);
+                KeyOutcome::Handled
+            }
+            a if a == config::internal::DOWN => {
+                self.move_sel(1);
+                KeyOutcome::Handled
+            }
+            a if a == config::internal::TOP => {
+                self.selected = 0;
+                self.ensure_visible();
+                KeyOutcome::Handled
+            }
+            a if a == config::internal::BOTTOM => {
+                self.selected = self.rows.len().saturating_sub(1);
+                self.ensure_visible();
+                KeyOutcome::Handled
+            }
+            a if a == config::internal::TOGGLE => self.toggle_or_open(),
+            a if a == config::internal::COLLAPSE => {
+                self.collapse_or_parent();
+                KeyOutcome::Handled
+            }
+            a if a == config::internal::REFRESH => {
+                self.rebuild();
+                KeyOutcome::Handled
+            }
+            a if a == config::internal::OPEN => {
+                let Some(entry) = self.rows.get(self.selected) else {
+                    return KeyOutcome::Handled;
+                };
+                if entry.is_dir {
+                    self.toggle_or_open()
+                } else {
+                    self.run_open(&entry.path.clone())
+                }
+            }
+            // Custom shell function from config.sh
+            other => {
+                let file = self.rows.get(self.selected).map(|e| e.path.clone());
+                KeyOutcome::Shell {
+                    action: other.to_string(),
+                    file,
+                }
+            }
+        }
+    }
 }
 
 impl FeatureView for ExplorerView {
@@ -242,7 +308,6 @@ impl FeatureView for ExplorerView {
                 "  "
             };
 
-            // No panel fill — only the selected row gets a chip bg.
             let name_fg = if entry.is_dir {
                 palette.blue
             } else {
@@ -294,47 +359,13 @@ impl FeatureView for ExplorerView {
     }
 
     fn on_key(&mut self, code: KeyCode, _mods: KeyModifiers) -> KeyOutcome {
-        match code {
-            KeyCode::Char('j') | KeyCode::Down => {
-                self.move_sel(1);
-                KeyOutcome::Handled
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                self.move_sel(-1);
-                KeyOutcome::Handled
-            }
-            KeyCode::Char('g') => {
-                self.selected = 0;
-                self.ensure_visible();
-                KeyOutcome::Handled
-            }
-            KeyCode::Char('G') => {
-                self.selected = self.rows.len().saturating_sub(1);
-                self.ensure_visible();
-                KeyOutcome::Handled
-            }
-            KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right => {
-                self.toggle_or_open();
-                KeyOutcome::Handled
-            }
-            KeyCode::Char('h') | KeyCode::Left => {
-                self.collapse_or_parent();
-                KeyOutcome::Handled
-            }
-            KeyCode::Char('r') => {
-                self.rebuild();
-                KeyOutcome::Handled
-            }
-            KeyCode::PageDown => {
-                self.move_sel(self.body_height.get().max(1) as isize);
-                KeyOutcome::Handled
-            }
-            KeyCode::PageUp => {
-                self.move_sel(-(self.body_height.get().max(1) as isize));
-                KeyOutcome::Handled
-            }
-            _ => KeyOutcome::Ignored,
-        }
+        let Some(token) = config::key_token(code) else {
+            return KeyOutcome::Ignored;
+        };
+        let Some(action) = self.config.action_for_key(&token).map(str::to_string) else {
+            return KeyOutcome::Ignored;
+        };
+        self.dispatch_action(&action)
     }
 
     fn on_mouse(&mut self, mouse: MouseEvent) -> KeyOutcome {
@@ -344,12 +375,12 @@ impl FeatureView for ExplorerView {
                     return KeyOutcome::Ignored;
                 };
                 if self.selected == idx {
-                    self.toggle_or_open();
+                    self.toggle_or_open()
                 } else {
                     self.selected = idx;
                     self.ensure_visible();
+                    KeyOutcome::Handled
                 }
-                KeyOutcome::Handled
             }
             MouseEventKind::ScrollDown => {
                 self.move_sel(3);
