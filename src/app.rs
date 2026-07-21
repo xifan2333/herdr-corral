@@ -11,6 +11,7 @@ use crate::host::LaunchContext;
 use crate::icons::{self, NerdFontSupport};
 use crate::layout;
 use crate::theme::Palette;
+use crate::ui::{self, ActivityItem};
 use crossterm::event::{
     self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
@@ -146,18 +147,11 @@ fn handle_key(state: &mut State, code: KeyCode, mods: KeyModifiers) -> bool {
 
 fn handle_click(state: &mut State, col: u16, row: u16) {
     for (feature, rect) in &state.nav_hits {
-        if contains(*rect, col, row) {
+        if ui::hit(*rect, col, row) {
             state.feature = *feature;
             return;
         }
     }
-}
-
-fn contains(r: Rect, col: u16, row: u16) -> bool {
-    col >= r.x
-        && col < r.x.saturating_add(r.width)
-        && row >= r.y
-        && row < r.y.saturating_add(r.height)
 }
 
 fn draw(
@@ -171,7 +165,6 @@ fn draw(
     let area = frame.area();
 
     // No own outer border/title: herdr already frames the pane and labels it.
-    // Fill the pane background once.
     frame.render_widget(
         Block::default().style(Style::default().bg(palette.panel_bg).fg(palette.text)),
         area,
@@ -179,97 +172,19 @@ fn draw(
 
     let (activity, body, footer) = layout::split_sidebar(area, true);
 
-    draw_activity(frame, activity, state, use_nf, palette);
+    let items: Vec<ActivityItem> = Feature::ALL
+        .iter()
+        .map(|&feature| ActivityItem {
+            feature,
+            icon: feature.icon(use_nf),
+            double_width: feature.icon_double_width(use_nf),
+        })
+        .collect();
+    let bar = ui::draw_activity(frame, activity, &items, state.feature, palette);
+    state.nav_hits = bar.hits;
+
     draw_body(frame, body, state.feature, palette, ctx);
     draw_footer(frame, footer, palette, nerd_font, state.feature, ctx);
-}
-
-fn draw_activity(
-    frame: &mut Frame,
-    area: Rect,
-    state: &mut State,
-    use_nf: bool,
-    palette: &Palette,
-) {
-    // Port of herdr-sidebar `draw_activity_bar`:
-    // - strip is 3 rows, plain pane background (no container)
-    // - icons ONLY on the middle row
-    // - active chip: middle-row bg + half-block caps on outer rows
-    //   so the glyph sits in the vertical center of a tall button
-    // - FA/Nerd glyphs are often 2 cells wide → reserve a slack cell
-    if area.height < 3 || area.width == 0 {
-        return;
-    }
-
-    let outer_top = area.y;
-    let outer_bottom = area.y + 2;
-    // Middle row only — same as `Rect::new(area.x, area.y + 1, area.width, 1)`.
-    let mid = Rect::new(area.x, area.y + 1, area.width, 1);
-
-    let chip_bg = palette.surface1;
-    // Span list mirrors herdr-sidebar: leading pad, then alternating chip + gap.
-    let mut spans: Vec<Span> = Vec::new();
-    spans.push(Span::raw(" "));
-    for feature in Feature::ALL {
-        let icon = feature.icon(use_nf);
-        // FA/Nerd glyphs are often 2 cells wide — reserve a slack cell.
-        let slack = if use_nf { " " } else { "" };
-        let selected = feature == state.feature;
-        let style = if selected {
-            Style::default()
-                .fg(palette.text)
-                .bg(chip_bg)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(palette.text)
-        };
-        spans.push(Span::styled(format!(" {icon}{slack} "), style));
-        spans.push(Span::raw(" "));
-    }
-
-    // Absolute chip bounds from real span widths (same scan as herdr-sidebar).
-    // Layout: [pad, chip0, gap, chip1, gap, chip2, gap] → chips at indices 1,3,5.
-    let mut x = mid.x;
-    let mut bounds: Vec<(Feature, u16, u16)> = Vec::new();
-    for (i, span) in spans.iter().enumerate() {
-        let w = span.width() as u16;
-        if i % 2 == 1 {
-            // chip span
-            let fi = i / 2;
-            if let Some(feature) = Feature::from_index(fi) {
-                bounds.push((feature, x, x + w));
-            }
-        }
-        x = x.saturating_add(w);
-    }
-
-    // Symmetric half-block caps on the ACTIVE chip only (reference).
-    if let Some((_, start, end)) = bounds.iter().find(|(f, _, _)| *f == state.feature) {
-        let chip_w = end.saturating_sub(*start);
-        if chip_w > 0 {
-            // fg = chip color, default bg → half blocks read as extensions of the mid chip.
-            let cap = Paragraph::new("▄".repeat(usize::from(chip_w)))
-                .style(Style::default().fg(chip_bg));
-            frame.render_widget(cap, Rect::new(*start, outer_top, chip_w, 1));
-            let cap = Paragraph::new("▀".repeat(usize::from(chip_w)))
-                .style(Style::default().fg(chip_bg));
-            frame.render_widget(cap, Rect::new(*start, outer_bottom, chip_w, 1));
-        }
-    }
-
-    frame.render_widget(Paragraph::new(Line::from(spans)), mid);
-
-    for (feature, start, end) in bounds {
-        state.nav_hits.push((
-            feature,
-            Rect {
-                x: start,
-                y: outer_top,
-                width: end.saturating_sub(start).max(1),
-                height: 3,
-            },
-        ));
-    }
 }
 
 fn draw_body(
@@ -279,7 +194,6 @@ fn draw_body(
     palette: &Palette,
     ctx: &LaunchContext,
 ) {
-    // Header line with feature title.
     if area.height == 0 {
         return;
     }

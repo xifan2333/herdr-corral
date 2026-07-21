@@ -12,6 +12,7 @@
 //! - [`icons`] — Nerd Font detection
 //! - [`feature`] — Explorer / SCM / GitHub identity
 //! - [`layout`] — sidebar strip geometry
+//! - [`ui`] — terminal UI primitives (activity chips, hit tests)
 //! - [`app`] — sidebar event loop
 
 pub mod app;
@@ -21,6 +22,7 @@ pub mod host;
 pub mod icons;
 pub mod layout;
 pub mod theme;
+pub mod ui;
 
 pub use feature::Feature;
 pub use host::{LaunchContext, Mode};
