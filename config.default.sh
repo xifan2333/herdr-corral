@@ -68,29 +68,61 @@ open() {
 
   if [[ -n "${WEZTERM_PANE:-}" ]] && command -v wezterm >/dev/null 2>&1; then
     echo CORRAL_SUSPEND=0
-    local state="${CORRAL_CONFIG_DIR:-/tmp}/wezterm-editor.pane" pid=""
-    [[ -f "$state" ]] && pid="$(cat "$state" 2>/dev/null || true)"
-    if [[ -n "$pid" ]] && ! wezterm cli list 2>/dev/null | awk '{print $1}' | grep -qx "$pid"; then
-      pid=""
+    local state="${CORRAL_CONFIG_DIR:-/tmp}/wezterm-editor.pane" pid="" me="${WEZTERM_PANE}"
+
+    # Pane-id alive check via JSON (table col1 is WINID, not PANEID).
+    wezterm_pane_alive() {
+      local p="$1"
+      [[ -n "$p" ]] || return 1
+      wezterm cli list --format json 2>/dev/null \
+        | jq -e --argjson id "$p" 'any(.[]; .pane_id == $id)' >/dev/null 2>&1
+    }
+
+    # Prefer remembered pane, else any other pane in the same tab (rightmost).
+    # Do NOT pass $editor as split prog — always send into an existing pane.
+    if [[ -f "$state" ]]; then
+      pid="$(cat "$state" 2>/dev/null || true)"
+      if ! wezterm_pane_alive "$pid" || [[ "$pid" == "$me" ]]; then
+        pid=""
+      fi
     fi
     if [[ -z "$pid" ]]; then
-      # shellcheck disable=SC2086
-      pid="$(wezterm cli split-pane --right --percent 75 -- $editor "$file" 2>/dev/null | tr -d '[:space:]')" || return 1
-      mkdir -p "${CORRAL_CONFIG_DIR:-/tmp}"
-      printf '%s' "$pid" >"$state"
-    else
-      wezterm cli activate-pane --pane-id "$pid" >/dev/null 2>&1 || true
-      case "$editor" in
-        *nvim*|*vim*|*vi)
-          wezterm cli send-text --pane-id "$pid" --no-paste $'\x1b:edit '"$vfile"$'\r' >/dev/null
-          ;;
-        *)
-          wezterm cli send-text --pane-id "$pid" --no-paste $'\x03' 2>/dev/null || true
-          # shellcheck disable=SC2086
-          wezterm cli send-text --pane-id "$pid" --no-paste "$editor $qfile"$'\r' >/dev/null
-          ;;
-      esac
+      pid="$(wezterm cli list --format json 2>/dev/null | jq -r --argjson me "$me" '
+        (map(select(.pane_id == $me))[0].tab_id) as $tab
+        | [ .[] | select(.tab_id == $tab and .pane_id != $me) ]
+        | sort_by(-.left_col)
+        | .[0].pane_id // empty
+      ' 2>/dev/null || true)"
+      wezterm_pane_alive "$pid" || pid=""
     fi
+    if [[ -z "$pid" ]]; then
+      # First open only: create a shell pane, then send editor into it.
+      pid="$(wezterm cli split-pane --pane-id "$me" --right --percent 75 2>/dev/null | tr -d '[:space:]')" || return 1
+      [[ -n "$pid" ]] || return 1
+      sleep 0.15
+    fi
+    mkdir -p "${CORRAL_CONFIG_DIR:-/tmp}"
+    printf '%s' "$pid" >"$state"
+
+    wezterm cli activate-pane --pane-id "$pid" >/dev/null 2>&1 || true
+    local title
+    title="$(wezterm cli list --format json 2>/dev/null | jq -r --argjson id "$pid" '.[] | select(.pane_id == $id) | .title // empty')"
+    case "$editor" in
+      *nvim*|*vim*|*vi)
+        if [[ "$title" == *nvim* || "$title" == *vim* ]]; then
+          wezterm cli send-text --pane-id "$pid" --no-paste $'\x1b:edit '"$vfile"$'\r' >/dev/null
+        else
+          wezterm cli send-text --pane-id "$pid" --no-paste $'\x03' 2>/dev/null || true
+          sleep 0.05
+          wezterm cli send-text --pane-id "$pid" --no-paste "$editor $qfile"$'\r' >/dev/null
+        fi
+        ;;
+      *)
+        wezterm cli send-text --pane-id "$pid" --no-paste $'\x03' 2>/dev/null || true
+        sleep 0.05
+        wezterm cli send-text --pane-id "$pid" --no-paste "$editor $qfile"$'\r' >/dev/null
+        ;;
+    esac
     return 0
   fi
 
