@@ -274,23 +274,34 @@ open() {
   local file="${1:-${CORRAL_FILE:-}}"
   [[ -n "$file" && -e "$file" ]] || return 1
   local editor="${EDITOR:-${VISUAL:-vi}}"
+  local qfile
+  qfile=$(printf '%q' "$file")
 
+  # --- Herdr: split right (wide editor) + send editor command ---
+  # ratio is the NEW pane's share; 0.75 keeps sidebar narrow.
   if [[ -n "${HERDR_BIN_PATH:-}" && -n "${HERDR_ENV:-}" ]]; then
     echo CORRAL_SUSPEND=0
-    local herdr="$HERDR_BIN_PATH"
-    # Prefer splitting beside the focused neighbor if known; else --current.
-    local out pid
-    out="$("$herdr" pane split --current --direction right --focus --ratio 0.55 2>&1)" || return 1
+    local herdr="$HERDR_BIN_PATH" out pid
+    out="$("$herdr" pane split --current --direction right --focus --ratio 0.75 2>&1)" || return 1
     pid="$(printf '%s' "$out" | sed -n 's/.*"pane_id":"\([^"]*\)".*/\1/p' | head -1)"
     [[ -n "$pid" ]] || return 1
-    # Quote path for the remote shell; editor may contain spaces (e.g. "code -w").
-    local qfile
-    qfile=$(printf '%q' "$file")
     "$herdr" pane send-text "$pid" "$editor $qfile" >/dev/null
     "$herdr" pane send-keys "$pid" enter >/dev/null
     return 0
   fi
 
+  # --- WezTerm standalone: real right split running $EDITOR ---
+  # Requires a live GUI (WEZTERM_PANE set) and `wezterm` on PATH.
+  if [[ -n "${WEZTERM_PANE:-}" ]] && command -v wezterm >/dev/null 2>&1; then
+    echo CORRAL_SUSPEND=0
+    # --percent = size of the NEW pane (right). 70–75 reads like an editor area.
+    # PROG is the editor argv — no send-text needed.
+    # shellcheck disable=SC2086
+    wezterm cli split-pane --right --percent 75 -- $editor "$file" >/dev/null
+    return $?
+  fi
+
+  # --- Fallback: editor in this TTY ---
   echo CORRAL_SUSPEND=1
   # shellcheck disable=SC2086
   exec $editor "$file"
