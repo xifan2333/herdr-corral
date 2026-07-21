@@ -66,15 +66,19 @@ open() {
   fi
 
   # --- wezterm ---
-  # Prefer remembered pane, else same-tab rightmost other pane, else split once.
-  # Always send editor into that pane (never `split-pane -- $editor file`).
+  # Resolve a target pane: remembered → same-tab rightmost → split once.
+  # Always send editor into it; never `split-pane -- $editor file`.
   if [[ -n "${WEZTERM_PANE:-}" ]] && command -v wezterm >/dev/null 2>&1; then
     echo CORRAL_SUSPEND=0
-    local state="$CORRAL_CONFIG_DIR/wezterm-editor.pane" me="$WEZTERM_PANE" pid title panes
+    local me="$WEZTERM_PANE" state="$CORRAL_CONFIG_DIR/wezterm-editor.pane"
+    local pid title panes saved
+
     panes="$(wezterm cli list --format json 2>/dev/null || true)"
-    pid="$(jq -r --argjson me "$me" --arg s "$(cat "$state" 2>/dev/null || true)" '
-      ($s | tonumber? // empty) as $saved
-      | if $saved and any(.[]; .pane_id == $saved) and $saved != $me then $saved
+    saved="$(cat "$state" 2>/dev/null || true)"
+
+    pid="$(jq -r --argjson me "$me" --arg saved "$saved" '
+      ($saved | tonumber? // 0) as $s
+      | if $s > 0 and any(.[]; .pane_id == $s) and $s != $me then $s
         else
           (map(select(.pane_id == $me))[0].tab_id) as $tab
           | [ .[] | select(.tab_id == $tab and .pane_id != $me) ]
@@ -91,12 +95,13 @@ open() {
     printf '%s' "$pid" >"$state"
 
     title="$(jq -r --argjson id "$pid" '.[] | select(.pane_id == $id) | .title // empty' <<<"$panes" 2>/dev/null || true)"
+
     wezterm cli activate-pane --pane-id "$pid" >/dev/null 2>&1 || true
-    if [[ "$editor" == *nvim* || "$editor" == *vim* || "$editor" == *vi ]] \
-      && [[ "$title" == *nvim* || "$title" == *vim* ]]; then
-      wezterm cli send-text --pane-id "$pid" --no-paste $'\x1b:edit '"$vfile"$'\r' >/dev/null
+    # nvim/vim already running in the pane → :edit; otherwise launch editor.
+    if [[ "$title" == *nvim* || "$title" == *vim* ]]; then
+      wezterm cli send-text --pane-id "$pid" --no-paste $'\e:edit '"$vfile"$'\r' >/dev/null
     else
-      wezterm cli send-text --pane-id "$pid" --no-paste $'\x03'"$editor $qfile"$'\r' >/dev/null
+      wezterm cli send-text --pane-id "$pid" --no-paste $'\003'"$editor $qfile"$'\r' >/dev/null
     fi
     return 0
   fi
