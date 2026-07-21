@@ -28,7 +28,7 @@ use std::time::Duration;
 /// Left container share of the body width (percent).
 const LEFT_PCT: u16 = 32;
 
-/// One cell per activity button (icon), stacked vertically with a gap row.
+/// Vertical pitch per activity icon (icon row + breathing room), VS Code-like.
 const ACTIVITY_BTN_HEIGHT: u16 = 2;
 
 struct State {
@@ -256,57 +256,82 @@ fn draw_activity(
     use_nf: bool,
     palette: &Palette,
 ) {
-    let active_bar = state.focus == Focus::Activity;
-    let border = if active_bar {
-        Style::default().fg(palette.accent)
-    } else {
-        Style::default().fg(palette.overlay0)
-    };
+    // VS Code-style rail: flat dark strip, no box border; selected = left tick + bright icon.
+    frame.render_widget(
+        Block::default().style(Style::default().bg(palette.surface_dim)),
+        area,
+    );
 
-    let block = Block::default()
-        .borders(Borders::RIGHT)
-        .border_style(border)
-        .style(Style::default().bg(palette.surface_dim));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    // Soft separator against the sidebar (one-column hairline via dim fg on right edge).
+    if area.width > 0 {
+        let edge = Rect {
+            x: area.x.saturating_add(area.width.saturating_sub(1)),
+            y: area.y,
+            width: 1,
+            height: area.height,
+        };
+        frame.render_widget(
+            Paragraph::new("│").style(Style::default().fg(palette.overlay0).bg(palette.surface_dim)),
+            edge,
+        );
+    }
 
-    let mut y = inner.y.saturating_add(1);
+    let mut y = area.y.saturating_add(1);
     for feature in Feature::ALL {
-        if y >= inner.y.saturating_add(inner.height) {
+        if y >= area.y.saturating_add(area.height) {
             break;
         }
         let selected = feature == state.feature;
         let icon = feature.icon(use_nf);
 
-        let style = if selected {
-            Style::default()
-                .fg(palette.accent)
-                .add_modifier(Modifier::BOLD)
-        } else if active_bar {
-            Style::default().fg(palette.text)
-        } else {
-            Style::default().fg(palette.subtext0)
-        };
-
-        // Center icon in the 1-cell content column when possible.
-        let btn = Rect {
-            x: inner.x,
+        let row = Rect {
+            x: area.x,
             y,
-            width: inner.width.max(1),
+            width: area.width.max(1),
             height: 1,
         };
-        let label = if inner.width >= 2 {
-            format!(" {icon}")
+
+        // Selected: accent indicator in col 0, icon in col 1 (or 0 if very narrow).
+        // Unselected: muted icon, no indicator.
+        let icon_style = if selected {
+            Style::default()
+                .fg(palette.text)
+                .bg(palette.surface_dim)
+                .add_modifier(Modifier::BOLD)
         } else {
-            icon.to_string()
+            Style::default()
+                .fg(palette.overlay1)
+                .bg(palette.surface_dim)
         };
-        frame.render_widget(Paragraph::new(Line::from(Span::styled(label, style))), btn);
+
+        if area.width >= 2 {
+            let ind = if selected { "▌" } else { " " };
+            let ind_style = if selected {
+                Style::default().fg(palette.accent).bg(palette.surface_dim)
+            } else {
+                Style::default().bg(palette.surface_dim)
+            };
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(ind, ind_style),
+                    Span::styled(icon, icon_style),
+                ])),
+                row,
+            );
+        } else {
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(icon, icon_style))),
+                row,
+            );
+        }
+
         state.activity_hits.push((
             feature,
             Rect {
                 x: area.x,
                 y,
                 width: area.width.max(1),
+                // taller hit target for easier clicking
                 height: ACTIVITY_BTN_HEIGHT,
             },
         ));
@@ -321,10 +346,9 @@ fn draw_panel(
     focused: bool,
     palette: &Palette,
 ) {
+    // Quiet chrome like the screenshot: thin borders, no loud focus boxes.
     let border = if focused {
-        Style::default()
-            .fg(palette.accent)
-            .add_modifier(Modifier::BOLD)
+        Style::default().fg(palette.overlay1)
     } else {
         Style::default().fg(palette.overlay0)
     };
@@ -335,13 +359,14 @@ fn draw_panel(
         .style(Style::default().bg(palette.panel_bg).fg(palette.text));
 
     if let Some(title) = view.title.as_deref().filter(|t| !t.is_empty()) {
-        let title_style = if focused {
-            Style::default()
-                .fg(palette.accent)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(palette.subtext0)
-        };
+        // Uppercase-ish sidebar header feel without shouting.
+        let title_style = Style::default()
+            .fg(palette.subtext0)
+            .add_modifier(if focused {
+                Modifier::BOLD
+            } else {
+                Modifier::empty()
+            });
         block = block.title(Span::styled(format!(" {title} "), title_style));
     }
 

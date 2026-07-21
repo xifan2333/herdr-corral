@@ -44,10 +44,13 @@ pub struct Regions {
     pub right: Rect,
 }
 
+/// Width of the VS Code-style activity rail (indicator + icon + padding).
+pub const ACTIVITY_WIDTH: u16 = 3;
+
 /// Split the host area into activity bar | left | right.
 ///
-/// - activity bar: fixed 3 columns (icon buttons)
-/// - left: `left_pct` of the remaining width (clamped 15..=50 of full width intent)
+/// - activity bar: fixed narrow icon rail
+/// - left: `left_pct` of the body width (clamped 15..=50)
 /// - right: the rest
 /// - bottom status row is reserved by the caller (pass area already shortened)
 pub fn split(area: Rect, left_pct: u16) -> Regions {
@@ -55,7 +58,7 @@ pub fn split(area: Rect, left_pct: u16) -> Regions {
     let cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Length(3),
+            Constraint::Length(ACTIVITY_WIDTH),
             Constraint::Min(10),
         ])
         .split(area);
