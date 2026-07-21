@@ -1,0 +1,137 @@
+{
+  "runId": "bc6aaf4c",
+  "agent": "reviewer",
+  "task": "[Read from: /home/xifan/code/herdr-corral/plan.md, /home/xifan/code/herdr-corral/progress.md]\n\nReview the CURRENT framework layer of the Rust Herdr sidebar plugin at /home/xifan/code/herdr-corral. Context: project was intentionally pivoted from monorepo/workbench to a single left-docked sidebar like alexarthurs/herdr-sidebar. Framework is considered mostly OK; user wants cleanup/review before features (Explorer/SCM/GitHub/preview) get heavy.\n\nANGLE: architecture & shape consistency.\nRead all of src/, herdr-plugin.toml, scripts/open-corral.sh, README.md, Cargo.toml. Compare mentally to herdr-sidebar shape (sidebar-only pane, in-process feature switch, preview later separate).\n\nReturn ONLY concrete findings, severity (blocker/should-fix/nit), file:line evidence, and why it matters for future feature growth. Do not edit files. End with: top 5 cleanups worth doing NOW before Explorer lands.",
+  "exitCode": 0,
+  "usage": {
+    "input": 106875,
+    "output": 7772,
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "cost": 0.260382,
+    "turns": 7
+  },
+  "model": "xai-cpa/grok-4.5:high",
+  "attemptedModels": [
+    "xai-cpa/grok-4.5:high"
+  ],
+  "modelAttempts": [
+    {
+      "model": "xai-cpa/grok-4.5:high",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 106875,
+        "output": 7772,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "cost": 0.260382,
+        "turns": 7
+      }
+    }
+  ],
+  "durationMs": 335053,
+  "toolCount": 31,
+  "acceptance": {
+    "status": "attested",
+    "explicit": false,
+    "effectiveAcceptance": {
+      "level": "attested",
+      "explicit": false,
+      "inferredReason": [
+        "read-only/reviewer-style agent"
+      ],
+      "criteria": [
+        {
+          "id": "criterion-1",
+          "must": "Return concrete findings with file paths and severity when applicable",
+          "evidence": [
+            "review-findings",
+            "residual-risks"
+          ],
+          "severity": "required"
+        }
+      ],
+      "evidence": [
+        "review-findings",
+        "residual-risks"
+      ],
+      "verify": [],
+      "stopRules": []
+    },
+    "inferredReason": [
+      "read-only/reviewer-style agent"
+    ],
+    "criteria": [
+      {
+        "id": "criterion-1",
+        "must": "Return concrete findings with file paths and severity when applicable",
+        "evidence": [
+          "review-findings",
+          "residual-risks"
+        ],
+        "severity": "required"
+      }
+    ],
+    "runtimeChecks": [],
+    "verifyRuns": [],
+    "childReport": {
+      "criteriaSatisfied": [
+        {
+          "id": "criterion-1",
+          "status": "satisfied",
+          "evidence": "Concrete architecture/shape findings with severity and file:line evidence across src/, herdr-plugin.toml, scripts/open-corral.sh, README.md, Cargo.toml; no file edits."
+        }
+      ],
+      "changedFiles": [],
+      "testsAddedOrUpdated": [],
+      "commandsRun": [
+        {
+          "command": "cargo check",
+          "result": "passed",
+          "summary": "corral package checks clean"
+        },
+        {
+          "command": "cargo test --lib",
+          "result": "passed",
+          "summary": "0 tests, 0 failures"
+        },
+        {
+          "command": "git log / rg / read of src + plugin manifests",
+          "result": "passed",
+          "summary": "Inspected full framework surface and sidebar pivot history (a79b91b)"
+        }
+      ],
+      "validationOutput": [
+        "Finished dev check successfully",
+        "test result: ok. 0 passed; 0 failed"
+      ],
+      "residualRisks": [
+        "j/k/Tab feature-cycling will collide with Explorer list navigation if not re-routed first",
+        "No FeatureView/per-feature state — Explorer likely inflates app.rs without a mount contract",
+        "focused_pane_id vs HERDR_PANE_ID conflation will break rename/preview docking assumptions",
+        "Binary has no subcommand surface for planned preview/ctl",
+        "Zero unit tests on pure host/layout/feature/hit-test logic",
+        "open-corral.sh zoom/swap/resize path is host-CLI fragile (external to Rust shell)"
+      ],
+      "noStagedFiles": true,
+      "diffSummary": "Review-only; no code changes",
+      "reviewFindings": [
+        "should-fix: src/app.rs:126-144 - shell key handler owns j/k/Tab for feature cycle; will fight Explorer tree nav",
+        "should-fix: src/app.rs:31-45,190-233 - no feature view/state mount; body is hard-coded match in app",
+        "should-fix: src/host.rs:39,96-99 + src/app.rs:112-116 - pane id semantics mix self pane and focused neighbor",
+        "should-fix: src/main.rs:6-8 - no CLI subcommand skeleton for future preview/ctl",
+        "should-fix: tests - 0 lib tests despite pure host/layout/feature/ui APIs",
+        "should-fix: src/app.rs:173,199-215,237-263 - always-on debug footer + duplicate body title waste sidebar rows",
+        "nit: Cargo.toml:5, src/main.rs:4, src/feature.rs:1,7 - stale workbench vocabulary after sidebar pivot",
+        "nit: src/theme.rs (~525 LOC) - palette port dominates crate vs shell surface",
+        "nit: scripts/open-corral.sh:54-58 - zoom on/off focus hack is fragile host integration",
+        "note: layout/ui/activity and single sidebar pane entry are correctly shaped post-a79b91b",
+        "top5-now: (1) focus/key routing (2) FeatureView+state (3) pane id split (4) CLI entry skeleton (5) footer/title + tests + naming scrub"
+      ],
+      "manualNotes": "plan.md and progress.md were missing (ENOENT). Review used README, plugin TOML, full src/, open-corral.sh, and git history through the sidebar pivot. No edits per instructions."
+    }
+  },
+  "transcriptPath": "/home/xifan/code/herdr-corral/.pi-subagents/artifacts/bc6aaf4c_reviewer_0_transcript.jsonl",
+  "timestamp": 1784622263773
+}

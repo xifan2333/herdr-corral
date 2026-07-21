@@ -4,11 +4,16 @@
 //! - **plugin mode**: launched by Herdr with `HERDR_ENV=1` / plugin env vars
 //! - **standalone mode**: run as a normal binary (`corral` / `cargo run`)
 //!
+//! Pane identity (do not conflate these):
+//! - [`LaunchContext::self_pane_id`] — **this** process's pane (`HERDR_PANE_ID`)
+//! - [`LaunchContext::focused_pane_id`] — pane focused at *invocation* time
+//!   (from `HERDR_PLUGIN_CONTEXT_JSON`); often a neighbor, not us
+//!
 //! Malformed or missing host input degrades to a minimal context (process cwd).
 //! Never panics.
 
 use serde::Deserialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// How the process was launched.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,6 +41,15 @@ pub struct LaunchContext {
     pub cwd: PathBuf,
     pub workspace_id: Option<String>,
     pub tab_id: Option<String>,
+    /// This plugin process's own pane id (`HERDR_PANE_ID`).
+    ///
+    /// Use for rename / tokens / preview ownership. Never filled from the
+    /// launch JSON "focused" pane — that is often a different pane.
+    pub self_pane_id: Option<String>,
+    /// Pane that was focused when the action/pane was invoked
+    /// (`HERDR_PLUGIN_CONTEXT_JSON.focused_pane_id`).
+    ///
+    /// Useful as a neighbor/dock target; **not** necessarily this process.
     pub focused_pane_id: Option<String>,
     pub plugin_id: Option<String>,
     pub entrypoint_id: Option<String>,
@@ -50,8 +64,18 @@ impl LaunchContext {
     }
 
     /// Path to `herdr` for CLI callbacks, if known.
-    pub fn herdr_bin(&self) -> Option<&PathBuf> {
-        self.herdr_bin.as_ref()
+    pub fn herdr_bin(&self) -> Option<&Path> {
+        self.herdr_bin.as_deref()
+    }
+
+    /// This process's pane id, if Herdr injected one.
+    pub fn self_pane_id(&self) -> Option<&str> {
+        self.self_pane_id.as_deref()
+    }
+
+    /// Invocation-time focused pane (neighbor), if known.
+    pub fn focused_pane_id(&self) -> Option<&str> {
+        self.focused_pane_id.as_deref()
     }
 }
 
@@ -75,31 +99,28 @@ pub fn from_env() -> LaunchContext {
     let json = std::env::var("HERDR_PLUGIN_CONTEXT_JSON").ok();
     let mut ctx = parse_context(mode, json.as_deref(), fallback_cwd);
 
-    ctx.plugin_id = std::env::var("HERDR_PLUGIN_ID").ok().filter(|s| !s.is_empty());
-    ctx.entrypoint_id = std::env::var("HERDR_PLUGIN_ENTRYPOINT_ID")
-        .ok()
-        .filter(|s| !s.is_empty());
-    ctx.herdr_bin = std::env::var("HERDR_BIN_PATH")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from);
+    ctx.plugin_id = env_nonempty("HERDR_PLUGIN_ID");
+    ctx.entrypoint_id = env_nonempty("HERDR_PLUGIN_ENTRYPOINT_ID");
+    ctx.herdr_bin = env_nonempty("HERDR_BIN_PATH").map(PathBuf::from);
 
-    // Env vars can fill ids when JSON is partial/absent.
+    // Own pane: only HERDR_PANE_ID (never the JSON focused pane).
+    ctx.self_pane_id = env_nonempty("HERDR_PANE_ID");
+
+    // Fill workspace/tab from env when JSON omitted them.
     if ctx.workspace_id.is_none() {
-        ctx.workspace_id = std::env::var("HERDR_WORKSPACE_ID")
-            .ok()
-            .filter(|s| !s.is_empty());
+        ctx.workspace_id = env_nonempty("HERDR_WORKSPACE_ID");
     }
     if ctx.tab_id.is_none() {
-        ctx.tab_id = std::env::var("HERDR_TAB_ID").ok().filter(|s| !s.is_empty());
+        ctx.tab_id = env_nonempty("HERDR_TAB_ID");
     }
-    if ctx.focused_pane_id.is_none() {
-        ctx.focused_pane_id = std::env::var("HERDR_PANE_ID")
-            .ok()
-            .filter(|s| !s.is_empty());
-    }
+    // focused_pane_id stays JSON-only (see field docs). Do not backfill from
+    // HERDR_PANE_ID — that would re-alias self vs focused.
 
     ctx
+}
+
+fn env_nonempty(key: &str) -> Option<String> {
+    std::env::var(key).ok().filter(|s| !s.is_empty())
 }
 
 fn detect_mode() -> Mode {
@@ -131,6 +152,7 @@ fn parse_context(mode: Mode, json: Option<&str>, fallback_cwd: PathBuf) -> Launc
         cwd,
         workspace_id: raw.workspace_id.filter(|s| !s.is_empty()),
         tab_id: raw.tab_id.filter(|s| !s.is_empty()),
+        self_pane_id: None,
         focused_pane_id: raw.focused_pane_id.filter(|s| !s.is_empty()),
         plugin_id: None,
         entrypoint_id: None,

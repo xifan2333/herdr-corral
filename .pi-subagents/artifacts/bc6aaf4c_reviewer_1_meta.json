@@ -1,0 +1,134 @@
+{
+  "runId": "bc6aaf4c",
+  "agent": "reviewer",
+  "task": "[Read from: /home/xifan/code/herdr-corral/plan.md, /home/xifan/code/herdr-corral/progress.md]\n\nReview the CURRENT framework layer of the Rust Herdr sidebar plugin at /home/xifan/code/herdr-corral. Framework-only: host/theme/icons/feature/layout/ui/app, no real Explorer yet.\n\nANGLE: correctness, API hygiene, error handling, Herdr integration, dead/hacky surfaces that will hurt later.\nRead all of src/ carefully (especially app.rs, host.rs, theme.rs, ui/activity.rs, herdr_cli.rs, feature.rs). Note: activity bar half-block chips are intentional TUI technique encapsulated in ui/activity.\n\nReturn concrete findings with severity + file/line + suggested fix direction. Do not edit. Separate: must-fix-now vs can-wait-until-feature.",
+  "exitCode": 0,
+  "usage": {
+    "input": 97391,
+    "output": 7837,
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "cost": 0.24180400000000002,
+    "turns": 6
+  },
+  "model": "xai-cpa/grok-4.5:high",
+  "attemptedModels": [
+    "xai-cpa/grok-4.5:high"
+  ],
+  "modelAttempts": [
+    {
+      "model": "xai-cpa/grok-4.5:high",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 97391,
+        "output": 7837,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "cost": 0.24180400000000002,
+        "turns": 6
+      }
+    }
+  ],
+  "durationMs": 335215,
+  "toolCount": 27,
+  "acceptance": {
+    "status": "attested",
+    "explicit": false,
+    "effectiveAcceptance": {
+      "level": "attested",
+      "explicit": false,
+      "inferredReason": [
+        "read-only/reviewer-style agent"
+      ],
+      "criteria": [
+        {
+          "id": "criterion-1",
+          "must": "Return concrete findings with file paths and severity when applicable",
+          "evidence": [
+            "review-findings",
+            "residual-risks"
+          ],
+          "severity": "required"
+        }
+      ],
+      "evidence": [
+        "review-findings",
+        "residual-risks"
+      ],
+      "verify": [],
+      "stopRules": []
+    },
+    "inferredReason": [
+      "read-only/reviewer-style agent"
+    ],
+    "criteria": [
+      {
+        "id": "criterion-1",
+        "must": "Return concrete findings with file paths and severity when applicable",
+        "evidence": [
+          "review-findings",
+          "residual-risks"
+        ],
+        "severity": "required"
+      }
+    ],
+    "runtimeChecks": [],
+    "verifyRuns": [],
+    "childReport": {
+      "criteriaSatisfied": [
+        {
+          "id": "criterion-1",
+          "status": "satisfied",
+          "evidence": "Concrete findings with severity and file:line citations across app.rs, host.rs, herdr_cli.rs, theme.rs, feature.rs, ui/activity.rs, icons.rs, layout.rs, lib.rs, scripts/open-corral.sh"
+        }
+      ],
+      "changedFiles": [],
+      "testsAddedOrUpdated": [],
+      "commandsRun": [
+        {
+          "command": "cargo test",
+          "result": "passed",
+          "summary": "lib+bin compile; 0 unit tests; 1 doctest ok"
+        },
+        {
+          "command": "cargo check",
+          "result": "passed",
+          "summary": "dev profile finished cleanly"
+        }
+      ],
+      "validationOutput": [
+        "cargo test: 0 lib tests, 0 bin tests, 1 doctest passed",
+        "cargo check: Finished dev profile successfully",
+        "No #[cfg(test)] / #[test] modules under src/"
+      ],
+      "residualRisks": [
+        "Terminal not restored on panic (raw mode/alt screen leak)",
+        "LaunchContext.focused_pane_id conflates HERDR_PANE_ID with JSON focused pane — wrong targets later",
+        "Global j/k/arrows will collide with Explorer tree navigation",
+        "No unit tests locking host/theme/feature contracts",
+        "theme auto_switch cannot detect light appearance; always prefers dark_name"
+      ],
+      "noStagedFiles": true,
+      "diffSummary": "Review-only; no code changes",
+      "reviewFindings": [
+        "blocker: src/app.rs:49-57,280-288 - terminal setup/restore not Drop/panic-safe; leaked raw mode on panic",
+        "blocker: src/host.rs:33-44,96-99 + src/app.rs:112-116 - focused_pane_id aliased with HERDR_PANE_ID; split pane_id vs focused_pane_id",
+        "major: src/app.rs:117-122 + src/herdr_cli.rs:11-23 - labeled_as set even when set_pane_label no-ops/fails; no retry",
+        "major: src/app.rs:50 - set_current_dir error ignored; UI cwd can diverge from process cwd",
+        "major: (gap) no unit tests for parse_context / Feature / hit / parse_color despite pure APIs",
+        "major-before-explorer: src/app.rs:125-143 - j/k/arrows/Tab globally cycle features; needs key routing before tree",
+        "minor: src/herdr_cli.rs:18-23 - blocking herdr CLI on UI thread; fully silent",
+        "minor: src/host.rs:122-128 - focused_pane_cwd preferred over workspace_cwd for sidebar root",
+        "minor: src/theme.rs:58-64 - auto_switch always dark_name without appearance detection",
+        "minor: src/app.rs:240-265 - footer is debug chrome (mode/theme/nf)",
+        "minor: src/lib.rs:18-25 - wide public module surface (app/herdr_cli/all palette ctors)",
+        "note: src/ui/activity.rs - half-block chips intentional and well encapsulated",
+        "note: scripts/open-corral.sh:56-57 - zoom on/off focus hack; open failures swallowed"
+      ],
+      "manualNotes": "plan.md and progress.md were missing at review start; review used full src/ + plugin manifest + open-corral.sh. Framework shape is sound for a scaffold; highest-value pre-feature fixes are RAII terminal restore, pane_id split, rename success tracking, and a small host/feature unit-test bed. Do not treat global j/k as permanent shell bindings."
+    }
+  },
+  "transcriptPath": "/home/xifan/code/herdr-corral/.pi-subagents/artifacts/bc6aaf4c_reviewer_1_transcript.jsonl",
+  "timestamp": 1784622263950
+}

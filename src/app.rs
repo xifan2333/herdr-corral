@@ -109,17 +109,13 @@ fn sync_pane_label(state: &mut State, ctx: &LaunchContext) {
     if state.labeled_as == Some(title) {
         return;
     }
-    // Prefer HERDR_PANE_ID (this pane) over context focused_pane_id.
-    let pane_id = std::env::var("HERDR_PANE_ID")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .or_else(|| ctx.focused_pane_id.clone());
-    herdr_cli::set_pane_label(
-        ctx.herdr_bin().map(|p| p.as_path()),
-        pane_id.as_deref(),
-        title,
-    );
-    state.labeled_as = Some(title);
+    // Only rename *this* pane. Never fall back to invocation-focused neighbor.
+    let ok = herdr_cli::set_pane_label(ctx.herdr_bin(), ctx.self_pane_id(), title);
+    if ok {
+        state.labeled_as = Some(title);
+    }
+    // If rename failed (standalone / herdr not ready), leave labeled_as unset
+    // so the next feature switch or loop can retry.
 }
 
 /// Returns true if the event loop should quit.
