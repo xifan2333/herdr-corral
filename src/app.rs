@@ -1,8 +1,7 @@
-//! Single-pane host TUI: activity bar + left/right containers.
+//! Single-pane host TUI: left panel (nav + feature) | right panel.
 //!
-//! Works as a Herdr plugin pane *or* a standalone terminal binary.
-//! First interactive piece: switch Explorer / SCM / GitHub via Nerd Font
-//! activity buttons (or `1`/`2`/`3`, `j`/`k` when activity is focused).
+//! Feature switcher is a **horizontal icon row inside the left panel**
+//! (as in the reference screenshot), not a separate leftmost activity rail.
 
 use crate::feature::Feature;
 use crate::host::LaunchContext;
@@ -25,25 +24,25 @@ use ratatui::{Frame, Terminal};
 use std::io::{self, Stdout};
 use std::time::Duration;
 
-/// Left container share of the body width (percent).
+/// Left container share of width (percent).
 const LEFT_PCT: u16 = 32;
 
-/// Vertical pitch per activity icon (icon row + breathing room), VS Code-like.
-const ACTIVITY_BTN_HEIGHT: u16 = 2;
+/// Columns reserved per nav icon button (icon + spacing).
+const NAV_BTN_WIDTH: u16 = 3;
 
 struct State {
     feature: Feature,
     focus: Focus,
-    /// Hit targets for activity buttons, filled each draw.
-    activity_hits: Vec<(Feature, Rect)>,
+    /// Hit targets for left-panel nav icons, filled each draw.
+    nav_hits: Vec<(Feature, Rect)>,
 }
 
 impl Default for State {
     fn default() -> Self {
         Self {
             feature: Feature::Explorer,
-            focus: Focus::Activity,
-            activity_hits: Vec::new(),
+            focus: Focus::Left,
+            nav_hits: Vec::new(),
         }
     }
 }
@@ -74,7 +73,7 @@ fn event_loop(
         let right = right_placeholder(state.feature);
 
         terminal.draw(|frame| {
-            state.activity_hits.clear();
+            state.nav_hits.clear();
             draw(
                 frame,
                 palette,
@@ -115,7 +114,6 @@ fn handle_key(state: &mut State, code: KeyCode, mods: KeyModifiers) -> bool {
         KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => return true,
         KeyCode::Esc => return true,
 
-        // Global feature shortcuts.
         KeyCode::Char(c @ '1'..='3') => {
             if let Some(f) = Feature::from_digit(c) {
                 state.feature = f;
@@ -123,41 +121,17 @@ fn handle_key(state: &mut State, code: KeyCode, mods: KeyModifiers) -> bool {
             }
         }
 
-        KeyCode::Tab => state.focus = state.focus.cycle(),
-        KeyCode::BackTab => {
-            state.focus = match state.focus {
-                Focus::Activity => Focus::Right,
-                Focus::Left => Focus::Activity,
-                Focus::Right => Focus::Left,
-            };
-        }
+        KeyCode::Tab | KeyCode::BackTab => state.focus = state.focus.toggle(),
 
-        // Activity bar navigation when focused.
-        KeyCode::Char('j') | KeyCode::Down if state.focus == Focus::Activity => {
+        // When left is focused, h/l still move focus; j/k cycle features.
+        KeyCode::Char('j') | KeyCode::Down if state.focus == Focus::Left => {
             state.feature = state.feature.next();
         }
-        KeyCode::Char('k') | KeyCode::Up if state.focus == Focus::Activity => {
+        KeyCode::Char('k') | KeyCode::Up if state.focus == Focus::Left => {
             state.feature = state.feature.prev();
         }
-        KeyCode::Enter if state.focus == Focus::Activity => {
-            state.focus = Focus::Left;
-        }
-
-        // Focus region shortcuts.
-        KeyCode::Char('h') | KeyCode::Left => {
-            state.focus = match state.focus {
-                Focus::Right => Focus::Left,
-                Focus::Left => Focus::Activity,
-                Focus::Activity => Focus::Activity,
-            };
-        }
-        KeyCode::Char('l') | KeyCode::Right => {
-            state.focus = match state.focus {
-                Focus::Activity => Focus::Left,
-                Focus::Left => Focus::Right,
-                Focus::Right => Focus::Right,
-            };
-        }
+        KeyCode::Char('h') | KeyCode::Left => state.focus = Focus::Left,
+        KeyCode::Char('l') | KeyCode::Right => state.focus = Focus::Right,
 
         _ => {}
     }
@@ -165,7 +139,7 @@ fn handle_key(state: &mut State, code: KeyCode, mods: KeyModifiers) -> bool {
 }
 
 fn handle_click(state: &mut State, col: u16, row: u16) {
-    for (feature, rect) in &state.activity_hits {
+    for (feature, rect) in &state.nav_hits {
         if contains(*rect, col, row) {
             state.feature = *feature;
             state.focus = Focus::Left;
@@ -175,11 +149,15 @@ fn handle_click(state: &mut State, col: u16, row: u16) {
 }
 
 fn contains(r: Rect, col: u16, row: u16) -> bool {
-    col >= r.x && col < r.x.saturating_add(r.width) && row >= r.y && row < r.y.saturating_add(r.height)
+    col >= r.x
+        && col < r.x.saturating_add(r.width)
+        && row >= r.y
+        && row < r.y.saturating_add(r.height)
 }
 
 fn left_view(feature: Feature) -> PanelView {
     PanelView {
+        // Title comes from the feature; nav icons sit under the border.
         title: Some(feature.title().into()),
         body: String::new(),
     }
@@ -211,11 +189,12 @@ fn draw(
     };
     let regions = layout::split(work, LEFT_PCT);
 
-    draw_activity(frame, regions.activity, state, use_nf, palette);
-    draw_panel(
+    draw_left_panel(
         frame,
         regions.left,
         left,
+        state,
+        use_nf,
         state.focus == Focus::Left,
         palette,
     );
@@ -233,120 +212,34 @@ fn draw(
         None => "nf?",
     };
     let hint = format!(
-        " corral  {}  {}  {}  {}  1/2/3 features  Tab focus  q quit ",
+        " corral  {}  {}  {}  {}  1/2/3  Tab  q ",
         ctx.mode.label(),
         palette.name,
         state.feature.id(),
         nf
     );
     let bar = Paragraph::new(hint).style(Style::default().fg(palette.subtext0));
-    let bar_area = Rect {
-        x: area.x,
-        y: area.y.saturating_add(area.height.saturating_sub(1)),
-        width: area.width,
-        height: 1,
-    };
-    frame.render_widget(bar, bar_area);
-}
-
-fn draw_activity(
-    frame: &mut Frame,
-    area: Rect,
-    state: &mut State,
-    use_nf: bool,
-    palette: &Palette,
-) {
-    // VS Code-style rail: flat dark strip, no box border; selected = left tick + bright icon.
     frame.render_widget(
-        Block::default().style(Style::default().bg(palette.surface_dim)),
-        area,
-    );
-
-    // Soft separator against the sidebar (one-column hairline via dim fg on right edge).
-    if area.width > 0 {
-        let edge = Rect {
-            x: area.x.saturating_add(area.width.saturating_sub(1)),
-            y: area.y,
-            width: 1,
-            height: area.height,
-        };
-        frame.render_widget(
-            Paragraph::new("│").style(Style::default().fg(palette.overlay0).bg(palette.surface_dim)),
-            edge,
-        );
-    }
-
-    let mut y = area.y.saturating_add(1);
-    for feature in Feature::ALL {
-        if y >= area.y.saturating_add(area.height) {
-            break;
-        }
-        let selected = feature == state.feature;
-        let icon = feature.icon(use_nf);
-
-        let row = Rect {
+        bar,
+        Rect {
             x: area.x,
-            y,
-            width: area.width.max(1),
+            y: area.y.saturating_add(area.height.saturating_sub(1)),
+            width: area.width,
             height: 1,
-        };
-
-        // Selected: accent indicator in col 0, icon in col 1 (or 0 if very narrow).
-        // Unselected: muted icon, no indicator.
-        let icon_style = if selected {
-            Style::default()
-                .fg(palette.text)
-                .bg(palette.surface_dim)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-                .fg(palette.overlay1)
-                .bg(palette.surface_dim)
-        };
-
-        if area.width >= 2 {
-            let ind = if selected { "▌" } else { " " };
-            let ind_style = if selected {
-                Style::default().fg(palette.accent).bg(palette.surface_dim)
-            } else {
-                Style::default().bg(palette.surface_dim)
-            };
-            frame.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled(ind, ind_style),
-                    Span::styled(icon, icon_style),
-                ])),
-                row,
-            );
-        } else {
-            frame.render_widget(
-                Paragraph::new(Line::from(Span::styled(icon, icon_style))),
-                row,
-            );
-        }
-
-        state.activity_hits.push((
-            feature,
-            Rect {
-                x: area.x,
-                y,
-                width: area.width.max(1),
-                // taller hit target for easier clicking
-                height: ACTIVITY_BTN_HEIGHT,
-            },
-        ));
-        y = y.saturating_add(ACTIVITY_BTN_HEIGHT);
-    }
+        },
+    );
 }
 
-fn draw_panel(
+/// Left panel: border + title, then horizontal feature icons, then body.
+fn draw_left_panel(
     frame: &mut Frame,
     area: Rect,
     view: &PanelView,
+    state: &mut State,
+    use_nf: bool,
     focused: bool,
     palette: &Palette,
 ) {
-    // Quiet chrome like the screenshot: thin borders, no loud focus boxes.
     let border = if focused {
         Style::default().fg(palette.overlay1)
     } else {
@@ -359,14 +252,108 @@ fn draw_panel(
         .style(Style::default().bg(palette.panel_bg).fg(palette.text));
 
     if let Some(title) = view.title.as_deref().filter(|t| !t.is_empty()) {
-        // Uppercase-ish sidebar header feel without shouting.
-        let title_style = Style::default()
-            .fg(palette.subtext0)
-            .add_modifier(if focused {
+        let title_style = Style::default().fg(palette.subtext0).add_modifier(
+            if focused {
                 Modifier::BOLD
             } else {
                 Modifier::empty()
-            });
+            },
+        );
+        block = block.title(Span::styled(format!(" {title} "), title_style));
+    }
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
+
+    let (nav, body) = layout::split_left_nav(inner);
+    draw_feature_nav(frame, nav, state, use_nf, palette);
+
+    if !view.body.is_empty() {
+        frame.render_widget(
+            Paragraph::new(view.body.as_str()).style(Style::default().fg(palette.subtext0)),
+            body,
+        );
+    }
+}
+
+/// Horizontal Nerd Font buttons inside the left panel (screenshot style).
+fn draw_feature_nav(
+    frame: &mut Frame,
+    area: Rect,
+    state: &mut State,
+    use_nf: bool,
+    palette: &Palette,
+) {
+    let mut x = area.x.saturating_add(1);
+    for feature in Feature::ALL {
+        if x.saturating_add(1) > area.x.saturating_add(area.width) {
+            break;
+        }
+        let selected = feature == state.feature;
+        let icon = feature.icon(use_nf);
+        let style = if selected {
+            Style::default()
+                .fg(palette.accent)
+                .bg(palette.panel_bg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+                .fg(palette.overlay1)
+                .bg(palette.panel_bg)
+        };
+
+        let btn = Rect {
+            x,
+            y: area.y,
+            width: 1,
+            height: 1,
+        };
+        frame.render_widget(Paragraph::new(Line::from(Span::styled(icon, style))), btn);
+
+        // Wider hit target for clicking.
+        state.nav_hits.push((
+            feature,
+            Rect {
+                x,
+                y: area.y,
+                width: NAV_BTN_WIDTH.min(area.width.saturating_sub(x.saturating_sub(area.x))),
+                height: 1,
+            },
+        ));
+        x = x.saturating_add(NAV_BTN_WIDTH);
+    }
+}
+
+fn draw_panel(
+    frame: &mut Frame,
+    area: Rect,
+    view: &PanelView,
+    focused: bool,
+    palette: &Palette,
+) {
+    let border = if focused {
+        Style::default().fg(palette.overlay1)
+    } else {
+        Style::default().fg(palette.overlay0)
+    };
+
+    let mut block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border)
+        .style(Style::default().bg(palette.panel_bg).fg(palette.text));
+
+    if let Some(title) = view.title.as_deref().filter(|t| !t.is_empty()) {
+        let title_style = Style::default().fg(palette.subtext0).add_modifier(
+            if focused {
+                Modifier::BOLD
+            } else {
+                Modifier::empty()
+            },
+        );
         block = block.title(Span::styled(format!(" {title} "), title_style));
     }
 
@@ -374,8 +361,10 @@ fn draw_panel(
     frame.render_widget(block, area);
 
     if !view.body.is_empty() {
-        let body = Paragraph::new(view.body.as_str()).style(Style::default().fg(palette.subtext0));
-        frame.render_widget(body, inner);
+        frame.render_widget(
+            Paragraph::new(view.body.as_str()).style(Style::default().fg(palette.subtext0)),
+            inner,
+        );
     }
 }
 
@@ -387,8 +376,7 @@ fn setup() -> io::Result<Terminal<CrosstermBackend<Stdout>>> {
         EnterAlternateScreen,
         crossterm::event::EnableMouseCapture
     )?;
-    let backend = CrosstermBackend::new(stdout);
-    Terminal::new(backend)
+    Terminal::new(CrosstermBackend::new(stdout))
 }
 
 fn restore(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<()> {

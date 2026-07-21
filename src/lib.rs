@@ -20,7 +20,7 @@ pub mod theme;
 pub use feature::Feature;
 pub use host::{LaunchContext, Mode};
 pub use icons::{NerdFontSupport, has_nerd_font};
-pub use layout::{Focus, PanelView, Regions};
+pub use layout::{Focus, PanelView};
 pub use theme::Palette;
 
 /// Entry point invoked by the binary (plugin pane or standalone).

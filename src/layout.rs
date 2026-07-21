@@ -1,16 +1,14 @@
-//! In-process workbench layout: activity bar + left container + right container.
+//! In-process workbench layout: left container + right container.
 //!
-//! One process owns the whole UI. Features plug into the left/right regions;
-//! the activity bar only switches which feature is active.
+//! Feature navigation lives *inside* the left panel (horizontal icon row),
+//! not as a separate leftmost rail.
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 
 /// Which region currently owns keyboard focus.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Focus {
-    /// Activity bar (feature switcher).
-    Activity,
-    /// Left feature pane.
+    /// Left feature pane (nav + content).
     #[default]
     Left,
     /// Right detail pane.
@@ -18,11 +16,10 @@ pub enum Focus {
 }
 
 impl Focus {
-    pub fn cycle(self) -> Self {
+    pub fn toggle(self) -> Self {
         match self {
-            Focus::Activity => Focus::Left,
             Focus::Left => Focus::Right,
-            Focus::Right => Focus::Activity,
+            Focus::Right => Focus::Left,
         }
     }
 }
@@ -36,47 +33,37 @@ pub struct PanelView {
     pub body: String,
 }
 
-/// Geometry for activity bar + two containers.
+/// Geometry for the two containers.
 #[derive(Clone, Copy, Debug)]
 pub struct Regions {
-    pub activity: Rect,
     pub left: Rect,
     pub right: Rect,
 }
 
-/// Width of the VS Code-style activity rail (indicator + icon + padding).
-pub const ACTIVITY_WIDTH: u16 = 3;
-
-/// Split the host area into activity bar | left | right.
+/// Split the host area into left | right.
 ///
-/// - activity bar: fixed narrow icon rail
-/// - left: `left_pct` of the body width (clamped 15..=50)
-/// - right: the rest
-/// - bottom status row is reserved by the caller (pass area already shortened)
+/// `left_pct` is the left container's share of the width (clamped 15..=50).
+/// Bottom status row is reserved by the caller (pass area already shortened).
 pub fn split(area: Rect, left_pct: u16) -> Regions {
-    // activity | body
-    let cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(ACTIVITY_WIDTH),
-            Constraint::Min(10),
-        ])
-        .split(area);
-
-    let body = cols[1];
     let left_pct = left_pct.clamp(15, 50);
-    // left_pct is of the full width; approximate as percent of body.
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
             Constraint::Percentage(left_pct),
             Constraint::Percentage(100 - left_pct),
         ])
-        .split(body);
-
+        .split(area);
     Regions {
-        activity: cols[0],
         left: chunks[0],
         right: chunks[1],
     }
+}
+
+/// Split a left panel's inner area into: horizontal nav row | feature body.
+pub fn split_left_nav(inner: Rect) -> (Rect, Rect) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(1)])
+        .split(inner);
+    (rows[0], rows[1])
 }
