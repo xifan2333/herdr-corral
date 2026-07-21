@@ -1,7 +1,7 @@
 //! Explorer: expandable file tree rooted at the launch cwd.
 
 use super::view::{FeatureView, KeyOutcome};
-use crate::ui::Palette;
+use crate::ui::{self, Palette};
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -182,24 +182,11 @@ impl ExplorerView {
         }
     }
 
-    fn glyph_for(&self, entry: &Entry) -> &'static str {
+    fn glyph_for(&self, entry: &Entry) -> ui::icons::FileGlyph {
         if entry.is_dir {
-            let open = self.expanded.contains(&entry.path);
-            if self.nerd_font {
-                if open {
-                    "\u{f07c}" // folder_open
-                } else {
-                    "\u{f07b}" // folder
-                }
-            } else if open {
-                "v"
-            } else {
-                ">"
-            }
-        } else if self.nerd_font {
-            "\u{f15b}" // file
+            ui::icons::dir_glyph(self.expanded.contains(&entry.path), self.nerd_font)
         } else {
-            "·"
+            ui::icons::file_glyph(&entry.path, self.nerd_font)
         }
     }
 
@@ -244,7 +231,7 @@ impl FeatureView for ExplorerView {
             let abs = self.scroll + i;
             let selected = abs == self.selected;
             let indent = "  ".repeat(entry.depth);
-            let glyph = self.glyph_for(entry);
+            let file_icon = self.glyph_for(entry);
             let chevron = if entry.is_dir {
                 if self.expanded.contains(&entry.path) {
                     "▾ "
@@ -256,18 +243,27 @@ impl FeatureView for ExplorerView {
             };
 
             // No panel fill — only the selected row gets a chip bg.
-            let fg = if entry.is_dir {
+            let name_fg = if entry.is_dir {
                 palette.blue
             } else {
                 palette.text
             };
-            let style = if selected {
+            let icon_fg = file_icon.color.unwrap_or(name_fg);
+            let name_style = if selected {
                 Style::default()
-                    .fg(fg)
+                    .fg(name_fg)
                     .bg(palette.surface1)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(fg)
+                Style::default().fg(name_fg)
+            };
+            let icon_style = if selected {
+                Style::default()
+                    .fg(icon_fg)
+                    .bg(palette.surface1)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(icon_fg)
             };
             let dim = if selected {
                 Style::default().fg(palette.overlay1).bg(palette.surface1)
@@ -277,8 +273,8 @@ impl FeatureView for ExplorerView {
 
             let line = Line::from(vec![
                 Span::styled(format!("{indent}{chevron}"), dim),
-                Span::styled(format!("{glyph} "), style),
-                Span::styled(entry.name.as_str(), style),
+                Span::styled(format!("{} ", file_icon.glyph), icon_style),
+                Span::styled(entry.name.as_str(), name_style),
             ]);
             let row_style = if selected {
                 Style::default().bg(palette.surface1)
