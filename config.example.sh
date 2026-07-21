@@ -2,9 +2,7 @@
 #   plugin:     $(herdr plugin config-dir corral)/config.sh
 #   standalone: ~/.config/corral/config.sh
 #
-# bind <key> <action>
-# Herdr: pane split cannot take a command → split + send-text.
-# WezTerm standalone: wezterm cli split-pane --right --percent 75 -- $EDITOR file
+# open() reuses one "Corral Editor" pane when possible (no new split every time).
 
 bind j down
 bind down down
@@ -19,6 +17,8 @@ bind right toggle
 bind enter toggle
 bind r refresh
 
+CORRAL_EDITOR_LABEL="Corral Editor"
+
 open() {
   local file="${1:-${CORRAL_FILE:-}}"
   [[ -n "$file" && -e "$file" ]] || return 1
@@ -26,27 +26,76 @@ open() {
   local qfile
   qfile=$(printf '%q' "$file")
 
-  # Herdr: wide right split + send editor command
   if [[ -n "${HERDR_BIN_PATH:-}" && -n "${HERDR_ENV:-}" ]]; then
     echo CORRAL_SUSPEND=0
-    local herdr="$HERDR_BIN_PATH" out pid
-    out="$("$herdr" pane split --current --direction right --focus --ratio 0.75 2>&1)" || return 1
-    pid="$(printf '%s' "$out" | sed -n 's/.*"pane_id":"\([^"]*\)".*/\1/p' | head -1)"
-    [[ -n "$pid" ]] || return 1
-    "$herdr" pane send-text "$pid" "$editor $qfile" >/dev/null
-    "$herdr" pane send-keys "$pid" enter >/dev/null
+    local herdr="$HERDR_BIN_PATH" pid="" out
+    pid="$("$herdr" pane list 2>/dev/null | python3 -c '
+import sys, json
+label = sys.argv[1]
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    raise SystemExit
+for p in d.get("result", d).get("panes", []):
+    if p.get("label") == label:
+        print(p.get("pane_id", "")); break
+' "$CORRAL_EDITOR_LABEL" 2>/dev/null || true)"
+
+    if [[ -z "$pid" ]]; then
+      out="$("$herdr" pane split --current --direction right --focus --ratio 0.75 2>&1)" || return 1
+      pid="$(printf '%s' "$out" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["result"]["pane"]["pane_id"])' 2>/dev/null || true)"
+      [[ -n "$pid" ]] || return 1
+      "$herdr" pane rename "$pid" "$CORRAL_EDITOR_LABEL" >/dev/null 2>&1 || true
+      "$herdr" pane send-text "$pid" "$editor $qfile" >/dev/null
+      "$herdr" pane send-keys "$pid" enter >/dev/null
+    else
+      "$herdr" pane zoom "$pid" --on >/dev/null 2>&1 || true
+      "$herdr" pane zoom "$pid" --off >/dev/null 2>&1 || true
+      case "$editor" in
+        *nvim*|*vim*|*vi)
+          "$herdr" pane send-keys "$pid" esc >/dev/null
+          "$herdr" pane send-text "$pid" ":edit $qfile" >/dev/null
+          "$herdr" pane send-keys "$pid" enter >/dev/null
+          ;;
+        *)
+          "$herdr" pane send-keys "$pid" ctrl+c >/dev/null
+          "$herdr" pane send-text "$pid" "$editor $qfile" >/dev/null
+          "$herdr" pane send-keys "$pid" enter >/dev/null
+          ;;
+      esac
+    fi
     return 0
   fi
 
-  # WezTerm: native right split running $EDITOR
   if [[ -n "${WEZTERM_PANE:-}" ]] && command -v wezterm >/dev/null 2>&1; then
     echo CORRAL_SUSPEND=0
-    # shellcheck disable=SC2086
-    wezterm cli split-pane --right --percent 75 -- $editor "$file" >/dev/null
-    return $?
+    local state="${CORRAL_CONFIG_DIR:-/tmp}/wezterm-editor.pane" pid=""
+    [[ -f "$state" ]] && pid="$(cat "$state" 2>/dev/null || true)"
+    if [[ -n "$pid" ]] && ! wezterm cli list 2>/dev/null | awk '{print $1}' | grep -qx "$pid"; then
+      pid=""
+    fi
+    if [[ -z "$pid" ]]; then
+      # shellcheck disable=SC2086
+      pid="$(wezterm cli split-pane --right --percent 75 -- $editor "$file" 2>/dev/null | tr -d '[:space:]')" || return 1
+      mkdir -p "${CORRAL_CONFIG_DIR:-/tmp}"
+      printf '%s' "$pid" >"$state"
+    else
+      wezterm cli activate-pane --pane-id "$pid" >/dev/null 2>&1 || true
+      case "$editor" in
+        *nvim*|*vim*|*vi)
+          wezterm cli send-text --pane-id "$pid" --no-paste $'\x1b' 2>/dev/null || true
+          wezterm cli send-text --pane-id "$pid" --no-paste ":edit $qfile"$'\r' >/dev/null
+          ;;
+        *)
+          wezterm cli send-text --pane-id "$pid" --no-paste $'\x03' 2>/dev/null || true
+          # shellcheck disable=SC2086
+          wezterm cli send-text --pane-id "$pid" --no-paste "$editor $qfile"$'\r' >/dev/null
+          ;;
+      esac
+    fi
+    return 0
   fi
 
-  # Fallback: this TTY
   echo CORRAL_SUSPEND=1
   # shellcheck disable=SC2086
   exec $editor "$file"

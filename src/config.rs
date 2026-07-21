@@ -267,9 +267,12 @@ bind right toggle
 bind enter toggle
 bind r refresh
 
-# Open selected file in $EDITOR.
-# Herdr: split a shell pane, then send-text the editor command (split cannot take argv).
-# Standalone: run $EDITOR on this TTY (request suspend).
+# Open selected file in $EDITOR — reuse one editor pane when possible.
+# Herdr / WezTerm: dock right once, then swap files in that same pane.
+# Standalone TTY fallback: suspend and run $EDITOR here.
+
+CORRAL_EDITOR_LABEL="Corral Editor"
+
 open() {
   local file="${1:-${CORRAL_FILE:-}}"
   [[ -n "$file" && -e "$file" ]] || return 1
@@ -277,28 +280,91 @@ open() {
   local qfile
   qfile=$(printf '%q' "$file")
 
-  # --- Herdr: split right (wide editor) + send editor command ---
-  # ratio is the NEW pane's share; 0.75 keeps sidebar narrow.
+  # --- Herdr: one labeled editor pane, reuse on later opens ---
   if [[ -n "${HERDR_BIN_PATH:-}" && -n "${HERDR_ENV:-}" ]]; then
     echo CORRAL_SUSPEND=0
-    local herdr="$HERDR_BIN_PATH" out pid
-    out="$("$herdr" pane split --current --direction right --focus --ratio 0.75 2>&1)" || return 1
-    pid="$(printf '%s' "$out" | sed -n 's/.*"pane_id":"\([^"]*\)".*/\1/p' | head -1)"
-    [[ -n "$pid" ]] || return 1
-    "$herdr" pane send-text "$pid" "$editor $qfile" >/dev/null
-    "$herdr" pane send-keys "$pid" enter >/dev/null
+    local herdr="$HERDR_BIN_PATH" pid="" out
+    # Find existing "Corral Editor" pane (any workspace tab).
+    pid="$("$herdr" pane list 2>/dev/null | sed -n 's/.*"label":"'"$CORRAL_EDITOR_LABEL"'".*"pane_id":"\([^"]*\)".*/\1/p' | head -1)"
+    # sed above is fragile if key order differs — use python when available.
+    if command -v python3 >/dev/null 2>&1; then
+      pid="$("$herdr" pane list 2>/dev/null | python3 -c '
+import sys, json
+label = sys.argv[1]
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    raise SystemExit
+for p in d.get("result", d).get("panes", []):
+    if p.get("label") == label:
+        print(p.get("pane_id", "")); break
+' "$CORRAL_EDITOR_LABEL" 2>/dev/null || true)"
+    fi
+
+    if [[ -z "$pid" ]]; then
+      out="$("$herdr" pane split --current --direction right --focus --ratio 0.75 2>&1)" || return 1
+      pid="$(printf '%s' "$out" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["result"]["pane"]["pane_id"])' 2>/dev/null || true)"
+      [[ -n "$pid" ]] || return 1
+      "$herdr" pane rename "$pid" "$CORRAL_EDITOR_LABEL" >/dev/null 2>&1 || true
+      "$herdr" pane send-text "$pid" "$editor $qfile" >/dev/null
+      "$herdr" pane send-keys "$pid" enter >/dev/null
+    else
+      # Reuse: focus, then :edit for vi-family, else restart editor command.
+      "$herdr" pane zoom "$pid" --on >/dev/null 2>&1 || true
+      "$herdr" pane zoom "$pid" --off >/dev/null 2>&1 || true
+      case "$editor" in
+        *nvim*|*vim*|*vi)
+          "$herdr" pane send-keys "$pid" esc >/dev/null
+          "$herdr" pane send-text "$pid" ":edit $qfile" >/dev/null
+          "$herdr" pane send-keys "$pid" enter >/dev/null
+          ;;
+        *)
+          # Interrupt whatever is running, then launch editor on the file.
+          "$herdr" pane send-keys "$pid" ctrl+c >/dev/null
+          "$herdr" pane send-text "$pid" "$editor $qfile" >/dev/null
+          "$herdr" pane send-keys "$pid" enter >/dev/null
+          ;;
+      esac
+    fi
     return 0
   fi
 
-  # --- WezTerm standalone: real right split running $EDITOR ---
-  # Requires a live GUI (WEZTERM_PANE set) and `wezterm` on PATH.
+  # --- WezTerm: reuse pane id stored under config dir ---
   if [[ -n "${WEZTERM_PANE:-}" ]] && command -v wezterm >/dev/null 2>&1; then
     echo CORRAL_SUSPEND=0
-    # --percent = size of the NEW pane (right). 70–75 reads like an editor area.
-    # PROG is the editor argv — no send-text needed.
-    # shellcheck disable=SC2086
-    wezterm cli split-pane --right --percent 75 -- $editor "$file" >/dev/null
-    return $?
+    local state="${CORRAL_CONFIG_DIR:-/tmp}/wezterm-editor.pane"
+    local pid=""
+    if [[ -f "$state" ]]; then
+      pid="$(cat "$state" 2>/dev/null || true)"
+      # Drop stale ids that are no longer in the mux.
+      if [[ -n "$pid" ]] && ! wezterm cli list 2>/dev/null | grep -q "^$pid\b\|pane_id=$pid\|$pid "; then
+        # list format is a table; match pane id column loosely
+        if ! wezterm cli list 2>/dev/null | awk '{print $1}' | grep -qx "$pid"; then
+          pid=""
+        fi
+      fi
+    fi
+    if [[ -z "$pid" ]]; then
+      # shellcheck disable=SC2086
+      pid="$(wezterm cli split-pane --right --percent 75 -- $editor "$file" 2>/dev/null | tr -d '[:space:]')" || return 1
+      [[ -n "$pid" ]] || return 1
+      mkdir -p "${CORRAL_CONFIG_DIR:-/tmp}"
+      printf '%s' "$pid" >"$state"
+    else
+      wezterm cli activate-pane --pane-id "$pid" >/dev/null 2>&1 || true
+      case "$editor" in
+        *nvim*|*vim*|*vi)
+          wezterm cli send-text --pane-id "$pid" --no-paste $'\x1b' 2>/dev/null || true
+          wezterm cli send-text --pane-id "$pid" --no-paste ":edit $qfile\r" >/dev/null
+          ;;
+        *)
+          wezterm cli send-text --pane-id "$pid" --no-paste $'\x03' 2>/dev/null || true
+          # shellcheck disable=SC2086
+          wezterm cli send-text --pane-id "$pid" --no-paste "$editor $qfile\r" >/dev/null
+          ;;
+      esac
+    fi
+    return 0
   fi
 
   # --- Fallback: editor in this TTY ---
