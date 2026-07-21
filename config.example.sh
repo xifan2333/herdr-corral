@@ -23,27 +23,21 @@ open() {
   local file="${1:-${CORRAL_FILE:-}}"
   [[ -n "$file" && -e "$file" ]] || return 1
   local editor="${EDITOR:-${VISUAL:-vi}}"
-  local qfile
+  # qfile: shell-quoted; vfile: vim :edit escaped (spaces only)
+  local qfile vfile
   qfile=$(printf '%q' "$file")
+  vfile=${file// /\\ }
 
   if [[ -n "${HERDR_BIN_PATH:-}" && -n "${HERDR_ENV:-}" ]]; then
     echo CORRAL_SUSPEND=0
     local herdr="$HERDR_BIN_PATH" pid="" out
-    pid="$("$herdr" pane list 2>/dev/null | python3 -c '
-import sys, json
-label = sys.argv[1]
-try:
-    d = json.load(sys.stdin)
-except Exception:
-    raise SystemExit
-for p in d.get("result", d).get("panes", []):
-    if p.get("label") == label:
-        print(p.get("pane_id", "")); break
-' "$CORRAL_EDITOR_LABEL" 2>/dev/null || true)"
+    pid="$("$herdr" pane list 2>/dev/null \
+      | jq -r --arg l "$CORRAL_EDITOR_LABEL" \
+          'first(.result.panes[] | select(.label == $l) | .pane_id) // empty' 2>/dev/null || true)"
 
     if [[ -z "$pid" ]]; then
       out="$("$herdr" pane split --current --direction right --focus --ratio 0.75 2>&1)" || return 1
-      pid="$(printf '%s' "$out" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["result"]["pane"]["pane_id"])' 2>/dev/null || true)"
+      pid="$(printf '%s' "$out" | jq -r '.result.pane.pane_id // empty' 2>/dev/null || true)"
       [[ -n "$pid" ]] || return 1
       "$herdr" pane rename "$pid" "$CORRAL_EDITOR_LABEL" >/dev/null 2>&1 || true
       "$herdr" pane send-text "$pid" "$editor $qfile" >/dev/null
@@ -54,7 +48,7 @@ for p in d.get("result", d).get("panes", []):
       case "$editor" in
         *nvim*|*vim*|*vi)
           "$herdr" pane send-keys "$pid" esc >/dev/null
-          "$herdr" pane send-text "$pid" ":edit $qfile" >/dev/null
+          "$herdr" pane send-text "$pid" ":edit $vfile" >/dev/null
           "$herdr" pane send-keys "$pid" enter >/dev/null
           ;;
         *)
@@ -83,8 +77,7 @@ for p in d.get("result", d).get("panes", []):
       wezterm cli activate-pane --pane-id "$pid" >/dev/null 2>&1 || true
       case "$editor" in
         *nvim*|*vim*|*vi)
-          wezterm cli send-text --pane-id "$pid" --no-paste $'\x1b' 2>/dev/null || true
-          wezterm cli send-text --pane-id "$pid" --no-paste ":edit $qfile"$'\r' >/dev/null
+          wezterm cli send-text --pane-id "$pid" --no-paste $'\x1b:edit '"$vfile"$'\r' >/dev/null
           ;;
         *)
           wezterm cli send-text --pane-id "$pid" --no-paste $'\x03' 2>/dev/null || true
