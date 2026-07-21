@@ -12,10 +12,12 @@
 
 pub mod app;
 pub mod host;
+pub mod icons;
 pub mod layout;
 pub mod theme;
 
 pub use host::{LaunchContext, Mode};
+pub use icons::{NerdFontSupport, has_nerd_font};
 pub use layout::{Containers, Focus, PanelView};
 pub use theme::Palette;
 

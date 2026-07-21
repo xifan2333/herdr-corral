@@ -8,6 +8,7 @@
 //! does not hardcode "left"/"right" labels.
 
 use crate::host::LaunchContext;
+use crate::icons::{self, NerdFontSupport};
 use crate::layout::{self, Focus, PanelView};
 use crate::theme::Palette;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
@@ -31,8 +32,9 @@ pub fn run(ctx: LaunchContext) -> io::Result<()> {
     let _ = std::env::set_current_dir(&ctx.cwd);
 
     let palette = Palette::resolve();
+    let nerd_font = icons::detect();
     let mut terminal = setup()?;
-    let result = event_loop(&mut terminal, &palette, &ctx);
+    let result = event_loop(&mut terminal, &palette, &nerd_font, &ctx);
     restore(&mut terminal)?;
     result
 }
@@ -40,6 +42,7 @@ pub fn run(ctx: LaunchContext) -> io::Result<()> {
 fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     palette: &Palette,
+    nerd_font: &NerdFontSupport,
     ctx: &LaunchContext,
 ) -> io::Result<()> {
     let mut focus = Focus::Left;
@@ -55,7 +58,7 @@ fn event_loop(
             body: String::new(),
         };
 
-        terminal.draw(|frame| draw(frame, palette, focus, &left, &right, ctx))?;
+        terminal.draw(|frame| draw(frame, palette, nerd_font, focus, &left, &right, ctx))?;
 
         if !event::poll(Duration::from_millis(100))? {
             continue;
@@ -83,6 +86,7 @@ fn event_loop(
 fn draw(
     frame: &mut Frame,
     palette: &Palette,
+    nerd_font: &NerdFontSupport,
     focus: Focus,
     left: &PanelView,
     right: &PanelView,
@@ -107,10 +111,16 @@ fn draw(
     );
 
     // Status line: plain text only, no background block.
+    let nf = match nerd_font.available {
+        Some(true) => "nf",
+        Some(false) => "no-nf",
+        None => "nf?",
+    };
     let hint = format!(
-        " corral  {}  {}  q quit ",
+        " corral  {}  {}  {}  q quit ",
         ctx.mode.label(),
-        palette.name
+        palette.name,
+        nf
     );
     let bar = Paragraph::new(hint).style(Style::default().fg(palette.subtext0));
     let bar_area = ratatui::layout::Rect {

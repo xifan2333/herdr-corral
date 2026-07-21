@@ -20,6 +20,8 @@ toml = "0.8"
 # Same color type Herdr uses. Crossterm backend powers the single-pane host TUI.
 ratatui = { version = "0.29", default-features = false, features = ["serde", "crossterm"] }
 crossterm = "0.28"
+# Detect whether the terminal can render Nerd Font glyphs (for future file icons).
+has-nerd-font = "0.20260228"
 
 [profile.release]
 opt-level = "z"
