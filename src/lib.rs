@@ -1,14 +1,18 @@
-//! corral — VS Code-style terminal workbench.
+//! corral — VS Code-style sidebar for the terminal.
 //!
-//! First a standalone TUI (like gitui). Optionally also a Herdr plugin.
+//! Shape (aligned with herdr-sidebar):
+//! - **one left-docked pane** hosts Explorer / SCM / GitHub
+//! - feature switch is in-process (top activity icons)
+//! - file/diff/PR detail opens later as a **separate preview pane**
+//! - also runs standalone (`corral`) without Herdr
 //!
-//! Shape:
-//! - one process owns the whole UI
-//! - left/right containers are **in-process** regions, not separate host panes
-//! - [`host`] is the only Herdr boundary (plugin vs standalone)
-//! - [`theme`] resolves colors (Herdr config if present, else `terminal`)
-//! - [`layout`] owns the two-container geometry
-//! - [`app`] is the host event loop / shell
+//! Modules:
+//! - [`host`] — plugin vs standalone launch context
+//! - [`theme`] — Herdr palette (or terminal fallback)
+//! - [`icons`] — Nerd Font detection
+//! - [`feature`] — Explorer / SCM / GitHub identity
+//! - [`layout`] — sidebar strip geometry
+//! - [`app`] — sidebar event loop
 
 pub mod app;
 pub mod feature;
@@ -20,7 +24,6 @@ pub mod theme;
 pub use feature::Feature;
 pub use host::{LaunchContext, Mode};
 pub use icons::{NerdFontSupport, has_nerd_font};
-pub use layout::{Focus, PanelView};
 pub use theme::Palette;
 
 /// Entry point invoked by the binary (plugin pane or standalone).

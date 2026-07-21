@@ -1,12 +1,14 @@
-//! Single-pane host TUI: left panel (nav + feature) | right panel.
+//! Sidebar TUI: activity strip + active feature body.
 //!
-//! Feature switcher is a **horizontal icon row inside the left panel**
-//! (as in the reference screenshot), not a separate leftmost activity rail.
+//! Shape matches herdr-sidebar:
+//! - one left-docked Herdr pane
+//! - Explorer / SCM / GitHub switch in-process via the top icon row
+//! - previews are NOT drawn here (separate pane later via control file)
 
 use crate::feature::Feature;
 use crate::host::LaunchContext;
 use crate::icons::{self, NerdFontSupport};
-use crate::layout::{self, Focus, PanelView};
+use crate::layout;
 use crate::theme::Palette;
 use crossterm::event::{
     self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
@@ -19,21 +21,16 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Paragraph};
 use ratatui::{Frame, Terminal};
 use std::io::{self, Stdout};
 use std::time::Duration;
 
-/// Left container share of width (percent).
-const LEFT_PCT: u16 = 32;
-
-/// Columns per nav icon button (padding + glyph + padding) — reads larger.
+/// Columns per activity icon chip (padding + glyph + padding).
 const NAV_BTN_WIDTH: u16 = 5;
 
 struct State {
     feature: Feature,
-    focus: Focus,
-    /// Hit targets for left-panel nav icons, filled each draw.
     nav_hits: Vec<(Feature, Rect)>,
 }
 
@@ -41,13 +38,12 @@ impl Default for State {
     fn default() -> Self {
         Self {
             feature: Feature::Explorer,
-            focus: Focus::Left,
             nav_hits: Vec::new(),
         }
     }
 }
 
-/// Run the host TUI until the user quits.
+/// Run the sidebar TUI until the user quits.
 pub fn run(ctx: LaunchContext) -> io::Result<()> {
     let _ = std::env::set_current_dir(&ctx.cwd);
 
@@ -69,21 +65,9 @@ fn event_loop(
     let use_nf = nerd_font.should_use_icons();
 
     loop {
-        let left = left_view(state.feature);
-        let right = right_placeholder(state.feature);
-
         terminal.draw(|frame| {
             state.nav_hits.clear();
-            draw(
-                frame,
-                palette,
-                nerd_font,
-                use_nf,
-                &mut state,
-                &left,
-                &right,
-                ctx,
-            );
+            draw(frame, palette, nerd_font, use_nf, &mut state, ctx);
         })?;
 
         if !event::poll(Duration::from_millis(100))? {
@@ -112,26 +96,18 @@ fn handle_key(state: &mut State, code: KeyCode, mods: KeyModifiers) -> bool {
     match code {
         KeyCode::Char('q') => return true,
         KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => return true,
-        KeyCode::Esc => return true,
+        // Esc does not quit the sidebar (herdr-sidebar closes preview instead).
+        KeyCode::Esc => {}
 
         KeyCode::Char(c @ '1'..='3') => {
             if let Some(f) = Feature::from_digit(c) {
                 state.feature = f;
-                state.focus = Focus::Left;
             }
         }
-
-        KeyCode::Tab | KeyCode::BackTab => state.focus = state.focus.toggle(),
-
-        // When left is focused, h/l still move focus; j/k cycle features.
-        KeyCode::Char('j') | KeyCode::Down if state.focus == Focus::Left => {
-            state.feature = state.feature.next();
-        }
-        KeyCode::Char('k') | KeyCode::Up if state.focus == Focus::Left => {
-            state.feature = state.feature.prev();
-        }
-        KeyCode::Char('h') | KeyCode::Left => state.focus = Focus::Left,
-        KeyCode::Char('l') | KeyCode::Right => state.focus = Focus::Right,
+        KeyCode::Char('j') | KeyCode::Down => state.feature = state.feature.next(),
+        KeyCode::Char('k') | KeyCode::Up => state.feature = state.feature.prev(),
+        KeyCode::Tab => state.feature = state.feature.next(),
+        KeyCode::BackTab => state.feature = state.feature.prev(),
 
         _ => {}
     }
@@ -142,7 +118,6 @@ fn handle_click(state: &mut State, col: u16, row: u16) {
     for (feature, rect) in &state.nav_hits {
         if contains(*rect, col, row) {
             state.feature = *feature;
-            state.focus = Focus::Left;
             return;
         }
     }
@@ -155,149 +130,57 @@ fn contains(r: Rect, col: u16, row: u16) -> bool {
         && row < r.y.saturating_add(r.height)
 }
 
-fn left_view(feature: Feature) -> PanelView {
-    PanelView {
-        // Title comes from the feature; nav icons sit under the border.
-        title: Some(feature.title().into()),
-        body: String::new(),
-    }
-}
-
-fn right_placeholder(feature: Feature) -> PanelView {
-    PanelView {
-        title: None,
-        body: format!("({} selection will show here)", feature.id()),
-    }
-}
-
 fn draw(
     frame: &mut Frame,
     palette: &Palette,
     nerd_font: &NerdFontSupport,
     use_nf: bool,
     state: &mut State,
-    left: &PanelView,
-    right: &PanelView,
     ctx: &LaunchContext,
 ) {
     let area = frame.area();
-    let work = Rect {
-        x: area.x,
-        y: area.y,
-        width: area.width,
-        height: area.height.saturating_sub(1),
-    };
-    let regions = layout::split(work, LEFT_PCT);
 
-    draw_left_panel(
-        frame,
-        regions.left,
-        left,
-        state,
-        use_nf,
-        state.focus == Focus::Left,
-        palette,
-    );
-    draw_panel(
-        frame,
-        regions.right,
-        right,
-        state.focus == Focus::Right,
-        palette,
-    );
-
-    let nf = match nerd_font.available {
-        Some(true) => "nf",
-        Some(false) => "no-nf",
-        None => "nf?",
-    };
-    let hint = format!(
-        " corral  {}  {}  {}  {}  1/2/3  Tab  q ",
-        ctx.mode.label(),
-        palette.name,
-        state.feature.id(),
-        nf
-    );
-    let bar = Paragraph::new(hint).style(Style::default().fg(palette.subtext0));
+    // No own outer border/title: herdr already frames the pane and labels it.
+    // Fill the pane background once.
     frame.render_widget(
-        bar,
-        Rect {
-            x: area.x,
-            y: area.y.saturating_add(area.height.saturating_sub(1)),
-            width: area.width,
-            height: 1,
-        },
+        Block::default().style(Style::default().bg(palette.panel_bg).fg(palette.text)),
+        area,
     );
+
+    let (activity, body, footer) = layout::split_sidebar(area, true);
+
+    draw_activity(frame, activity, state, use_nf, palette);
+    draw_body(frame, body, state.feature, palette, ctx);
+    draw_footer(frame, footer, palette, nerd_font, state.feature, ctx);
 }
 
-/// Left panel: border + title, then horizontal feature icons, then body.
-fn draw_left_panel(
+fn draw_activity(
     frame: &mut Frame,
     area: Rect,
-    view: &PanelView,
     state: &mut State,
     use_nf: bool,
-    focused: bool,
     palette: &Palette,
 ) {
-    let border = if focused {
-        Style::default().fg(palette.overlay1)
-    } else {
-        Style::default().fg(palette.overlay0)
-    };
-
-    let mut block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(border)
-        .style(Style::default().bg(palette.panel_bg).fg(palette.text));
-
-    if let Some(title) = view.title.as_deref().filter(|t| !t.is_empty()) {
-        let title_style = Style::default().fg(palette.subtext0).add_modifier(
-            if focused {
-                Modifier::BOLD
-            } else {
-                Modifier::empty()
+    // Soft underline under the activity strip.
+    if area.height > 0 {
+        let line_y = area.y.saturating_add(area.height.saturating_sub(1));
+        frame.render_widget(
+            Paragraph::new("─".repeat(area.width as usize))
+                .style(Style::default().fg(palette.overlay0).bg(palette.panel_bg)),
+            Rect {
+                x: area.x,
+                y: line_y,
+                width: area.width,
+                height: 1,
             },
         );
-        block = block.title(Span::styled(format!(" {title} "), title_style));
     }
 
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    if inner.height == 0 || inner.width == 0 {
-        return;
-    }
-
-    let (nav, body) = layout::split_left_nav(inner);
-    draw_feature_nav(frame, nav, state, use_nf, palette);
-
-    if !view.body.is_empty() {
-        frame.render_widget(
-            Paragraph::new(view.body.as_str()).style(Style::default().fg(palette.subtext0)),
-            body,
-        );
-    }
-}
-
-/// Horizontal Nerd Font buttons inside the left panel.
-/// Selected item: filled background chip; unselected: muted glyph only.
-fn draw_feature_nav(
-    frame: &mut Frame,
-    area: Rect,
-    state: &mut State,
-    use_nf: bool,
-    palette: &Palette,
-) {
-    // Vertical center of the nav strip (NAV_HEIGHT is typically 3).
     let icon_y = area.y.saturating_add(area.height.saturating_sub(1) / 2);
     let mut x = area.x.saturating_add(1);
 
     for feature in Feature::ALL {
-        let avail = area
-            .x
-            .saturating_add(area.width)
-            .saturating_sub(x);
+        let avail = area.x.saturating_add(area.width).saturating_sub(x);
         if avail < 3 {
             break;
         }
@@ -306,7 +189,6 @@ fn draw_feature_nav(
         let icon = feature.icon(use_nf);
 
         let (fg, bg) = if selected {
-            // Accent text on a solid chip so the active feature reads clearly.
             (palette.text, palette.surface1)
         } else {
             (palette.overlay1, palette.panel_bg)
@@ -317,20 +199,17 @@ fn draw_feature_nav(
             Modifier::empty()
         });
 
-        // Full chip background across button width (and full nav strip height for hit feel).
         let chip = Rect {
             x,
             y: area.y,
             width: w,
-            height: area.height.max(1),
+            height: area.height.saturating_sub(1).max(1),
         };
         frame.render_widget(Block::default().style(Style::default().bg(bg)), chip);
 
-        // Center the glyph inside the chip.
-        let glyph_x = x.saturating_add(w.saturating_sub(1) / 2);
         let glyph = Rect {
-            x: glyph_x,
-            y: icon_y,
+            x: x.saturating_add(w.saturating_sub(1) / 2),
+            y: icon_y.min(chip.y.saturating_add(chip.height.saturating_sub(1))),
             width: 1,
             height: 1,
         };
@@ -340,53 +219,93 @@ fn draw_feature_nav(
         );
 
         state.nav_hits.push((feature, chip));
-        x = x.saturating_add(w.saturating_add(1)); // 1-col gap between chips
+        x = x.saturating_add(w.saturating_add(1));
     }
 }
 
-fn draw_panel(
+fn draw_body(
     frame: &mut Frame,
     area: Rect,
-    view: &PanelView,
-    focused: bool,
+    feature: Feature,
     palette: &Palette,
+    ctx: &LaunchContext,
 ) {
-    let border = if focused {
-        Style::default().fg(palette.overlay1)
-    } else {
-        Style::default().fg(palette.overlay0)
+    // Header line with feature title.
+    if area.height == 0 {
+        return;
+    }
+    let title = Paragraph::new(Line::from(Span::styled(
+        format!(" {}", feature.title()),
+        Style::default()
+            .fg(palette.subtext0)
+            .bg(palette.panel_bg)
+            .add_modifier(Modifier::BOLD),
+    )));
+    frame.render_widget(
+        title,
+        Rect {
+            x: area.x,
+            y: area.y,
+            width: area.width,
+            height: 1,
+        },
+    );
+
+    if area.height < 3 {
+        return;
+    }
+    let body = Rect {
+        x: area.x.saturating_add(1),
+        y: area.y.saturating_add(2),
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
     };
+    let placeholder = match feature {
+        Feature::Explorer => format!("file tree goes here\n{}", ctx.cwd.display()),
+        Feature::Scm => "git changes go here".into(),
+        Feature::GitHub => "issues / PRs go here".into(),
+    };
+    frame.render_widget(
+        Paragraph::new(placeholder).style(Style::default().fg(palette.overlay1)),
+        body,
+    );
+}
 
-    let mut block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(border)
-        .style(Style::default().bg(palette.panel_bg).fg(palette.text));
-
-    if let Some(title) = view.title.as_deref().filter(|t| !t.is_empty()) {
-        let title_style = Style::default().fg(palette.subtext0).add_modifier(
-            if focused {
-                Modifier::BOLD
-            } else {
-                Modifier::empty()
-            },
-        );
-        block = block.title(Span::styled(format!(" {title} "), title_style));
+fn draw_footer(
+    frame: &mut Frame,
+    area: Rect,
+    palette: &Palette,
+    nerd_font: &NerdFontSupport,
+    feature: Feature,
+    ctx: &LaunchContext,
+) {
+    if area.height == 0 {
+        return;
     }
-
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    if !view.body.is_empty() {
-        frame.render_widget(
-            Paragraph::new(view.body.as_str()).style(Style::default().fg(palette.subtext0)),
-            inner,
-        );
-    }
+    let nf = match nerd_font.available {
+        Some(true) => "nf",
+        Some(false) => "no-nf",
+        None => "nf?",
+    };
+    let text = format!(
+        " {}  {}  {}  {}  1/2/3  q ",
+        ctx.mode.label(),
+        palette.name,
+        feature.id(),
+        nf
+    );
+    frame.render_widget(
+        Paragraph::new(text).style(Style::default().fg(palette.subtext0).bg(palette.panel_bg)),
+        area,
+    );
 }
 
 fn setup() -> io::Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
+    // Colors are UI, not pipeable output — ignore NO_COLOR from agent shells
+    // (same rationale as herdr-sidebar).
+    crossterm::style::force_color_output(true);
     execute!(
         stdout,
         EnterAlternateScreen,

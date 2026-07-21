@@ -1,64 +1,50 @@
 # corral
 
-VS Code 风格的终端工作台（Rust）。**开发中**。
+VS Code 风格的**左侧边栏**（Rust）。**开发中**。
 
-**先是独立 TUI，再是可选的 Herdr 插件** — 和 gitui / herdr-file-viewer 同一思路。
-
-## 两种启动方式
-
-| 模式 | 启动 | 说明 |
-|---|---|---|
-| **standalone** | `cargo run --release` / `./target/release/corral` | 普通终端程序，不依赖 Herdr |
-| **plugin** | `herdr plugin action invoke corral.open` | Herdr 开一个 split pane 跑同一二进制 |
-
-Host 边界在 `corral::host`：有 `HERDR_ENV` / `HERDR_PLUGIN_*` → plugin，否则 → standalone。  
-缺 Herdr config 时 theme 回落到内置 `terminal` 色表。
-
-## 形状
+对齐 [herdr-sidebar](https://github.com/alexarthurs/herdr-sidebar) 的形状，而不是整页 workbench：
 
 ```text
-corral 进程
- ├── left  container   (后续挂 Explorer / SCM / GitHub)
- └── right container   (后续挂主视图)
+┌────────────┬──────────────────────────────┐
+│  Sidebar   │  用户原有 panes / 未来 Preview │
+│  [][][] │                              │
+│  树 / 列表  │                              │
+└────────────┴──────────────────────────────┘
 ```
 
-不是两个宿主 pane；左右是进程内 region。
-
-## 现状
-
-| 层 | 状态 |
-|---|---|
-| `host` | 已实现：plugin / standalone 检测 + LaunchContext |
-| `theme` | 已实现：Herdr 主题表；无 config → `terminal` |
-| `layout` | 已实现：左右容器几何 + focus |
-| `app` | 已实现：空容器骨架 |
-| Explorer / SCM / GitHub | 未实现 |
+- **一个** left-docked Herdr pane
+- 顶栏横排 feature icons：Explorer / SCM / GitHub（进程内切换）
+- 详情（文件 / diff / PR）→ **以后**用独立 preview pane + control file
+- 也可 standalone：`./target/release/corral`
 
 ## 开发
 
 ```bash
-# 独立模式
 cargo build --release
+
+# 独立
 ./target/release/corral
 
-# 插件模式
+# 插件（左 dock）
 herdr plugin link .
 herdr plugin action invoke corral.open
 ```
 
-快捷键：`Tab` / `h` `l` 切焦点，`q` / `Esc` 退出。
+快捷键：`1`/`2`/`3` 或 `j`/`k`/`Tab` 切 feature，`q` 退出。
 
-## 目录
+## 模块
 
-```text
-herdr-corral/
-  herdr-plugin.toml      # 仅插件分发需要
-  scripts/open-corral.sh
-  src/
-    main.rs
-    lib.rs
-    host.rs              # Herdr 边界（可选）
-    theme.rs
-    layout.rs
-    app.rs
-```
+| 模块 | 作用 |
+|---|---|
+| `host` | plugin / standalone 上下文 |
+| `theme` | Herdr 主题色表 |
+| `icons` | Nerd Font 检测 |
+| `feature` | Explorer / SCM / GitHub |
+| `layout` | activity + body 几何 |
+| `app` | sidebar 事件循环 |
+
+## 下一步
+
+1. Explorer 文件树  
+2. preview 子命令 + ctl 协议  
+3. SCM / GitHub view  
