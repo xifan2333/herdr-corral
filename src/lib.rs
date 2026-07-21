@@ -16,6 +16,7 @@
 
 pub mod app;
 pub mod feature;
+pub mod herdr_cli;
 pub mod host;
 pub mod icons;
 pub mod layout;

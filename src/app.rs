@@ -6,6 +6,7 @@
 //! - previews are NOT drawn here (separate pane later via control file)
 
 use crate::feature::Feature;
+use crate::herdr_cli;
 use crate::host::LaunchContext;
 use crate::icons::{self, NerdFontSupport};
 use crate::layout;
@@ -31,6 +32,8 @@ const NAV_BTN_WIDTH: u16 = 5;
 
 struct State {
     feature: Feature,
+    /// Last label pushed to Herdr (avoid spamming rename every frame).
+    labeled_as: Option<&'static str>,
     nav_hits: Vec<(Feature, Rect)>,
 }
 
@@ -38,6 +41,7 @@ impl Default for State {
     fn default() -> Self {
         Self {
             feature: Feature::Explorer,
+            labeled_as: None,
             nav_hits: Vec::new(),
         }
     }
@@ -64,6 +68,9 @@ fn event_loop(
     let mut state = State::default();
     let use_nf = nerd_font.should_use_icons();
 
+    // Initial Herdr border title = active feature.
+    sync_pane_label(&mut state, ctx);
+
     loop {
         terminal.draw(|frame| {
             state.nav_hits.clear();
@@ -76,19 +83,45 @@ fn event_loop(
 
         match event::read()? {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
+                let before = state.feature;
                 if handle_key(&mut state, key.code, key.modifiers) {
                     break;
+                }
+                if state.feature != before {
+                    sync_pane_label(&mut state, ctx);
                 }
             }
             Event::Mouse(m) => {
                 if matches!(m.kind, MouseEventKind::Down(MouseButton::Left)) {
+                    let before = state.feature;
                     handle_click(&mut state, m.column, m.row);
+                    if state.feature != before {
+                        sync_pane_label(&mut state, ctx);
+                    }
                 }
             }
             _ => {}
         }
     }
     Ok(())
+}
+
+fn sync_pane_label(state: &mut State, ctx: &LaunchContext) {
+    let title = state.feature.title();
+    if state.labeled_as == Some(title) {
+        return;
+    }
+    // Prefer HERDR_PANE_ID (this pane) over context focused_pane_id.
+    let pane_id = std::env::var("HERDR_PANE_ID")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| ctx.focused_pane_id.clone());
+    herdr_cli::set_pane_label(
+        ctx.herdr_bin().map(|p| p.as_path()),
+        pane_id.as_deref(),
+        title,
+    );
+    state.labeled_as = Some(title);
 }
 
 /// Returns true if the event loop should quit.
@@ -162,6 +195,7 @@ fn draw_activity(
     palette: &Palette,
 ) {
     // Soft underline under the activity strip.
+    let chip_h = area.height.saturating_sub(1).max(1);
     if area.height > 0 {
         let line_y = area.y.saturating_add(area.height.saturating_sub(1));
         frame.render_widget(
@@ -176,7 +210,6 @@ fn draw_activity(
         );
     }
 
-    let icon_y = area.y.saturating_add(area.height.saturating_sub(1) / 2);
     let mut x = area.x.saturating_add(1);
 
     for feature in Feature::ALL {
@@ -188,10 +221,11 @@ fn draw_activity(
         let selected = feature == state.feature;
         let icon = feature.icon(use_nf);
 
+        // Selected: chip background. Idle: theme main text (white-ish), no chip.
         let (fg, bg) = if selected {
             (palette.text, palette.surface1)
         } else {
-            (palette.overlay1, palette.panel_bg)
+            (palette.text, palette.panel_bg)
         };
         let style = Style::default().fg(fg).bg(bg).add_modifier(if selected {
             Modifier::BOLD
@@ -203,18 +237,21 @@ fn draw_activity(
             x,
             y: area.y,
             width: w,
-            height: area.height.saturating_sub(1).max(1),
+            height: chip_h,
         };
+        // Paint the whole chip so the glyph sits on a solid block when selected.
         frame.render_widget(Block::default().style(Style::default().bg(bg)), chip);
 
+        // Center glyph both horizontally and vertically inside the chip.
         let glyph = Rect {
-            x: x.saturating_add(w.saturating_sub(1) / 2),
-            y: icon_y.min(chip.y.saturating_add(chip.height.saturating_sub(1))),
+            x: chip.x.saturating_add(chip.width.saturating_sub(1) / 2),
+            y: chip.y.saturating_add(chip.height.saturating_sub(1) / 2),
             width: 1,
             height: 1,
         };
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(icon, style))),
+            Paragraph::new(Line::from(Span::styled(icon, style)))
+                .alignment(ratatui::layout::Alignment::Center),
             glyph,
         );
 
