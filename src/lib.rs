@@ -10,10 +10,10 @@
 //! - [`host`] — plugin vs standalone launch context
 //! - [`theme`] — Herdr palette (or terminal fallback)
 //! - [`icons`] — Nerd Font detection
-//! - [`feature`] — Explorer / SCM / GitHub identity
+//! - [`feature`] — Explorer / SCM / GitHub identity + [`feature::FeatureView`]
 //! - [`layout`] — sidebar strip geometry
 //! - [`ui`] — terminal UI primitives (activity chips, hit tests)
-//! - [`app`] — sidebar event loop
+//! - [`app`] — sidebar event loop / key routing
 
 pub mod app;
 pub mod feature;
@@ -24,7 +24,7 @@ pub mod layout;
 pub mod theme;
 pub mod ui;
 
-pub use feature::Feature;
+pub use feature::{Feature, FeatureView, KeyOutcome};
 pub use host::{LaunchContext, Mode};
 pub use icons::{NerdFontSupport, has_nerd_font};
 pub use theme::Palette;

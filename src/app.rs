@@ -4,8 +4,12 @@
 //! - one left-docked Herdr pane
 //! - Explorer / SCM / GitHub switch in-process via the top icon row
 //! - previews are NOT drawn here (separate pane later via control file)
+//!
+//! Key ownership:
+//! - **shell**: `q`, `Ctrl-C`, `1`/`2`/`3`, activity icon clicks
+//! - **active feature body**: everything else (`j`/`k`, …) via [`FeatureView`]
 
-use crate::feature::Feature;
+use crate::feature::{Feature, KeyOutcome, Views};
 use crate::herdr_cli;
 use crate::host::LaunchContext;
 use crate::icons::{self, NerdFontSupport};
@@ -21,8 +25,7 @@ use crossterm::terminal::{
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::style::Style;
 use ratatui::widgets::{Block, Paragraph};
 use ratatui::{Frame, Terminal};
 use std::io::{self, Stdout};
@@ -30,15 +33,17 @@ use std::time::Duration;
 
 struct State {
     feature: Feature,
+    views: Views,
     /// Last label pushed to Herdr (avoid spamming rename every frame).
     labeled_as: Option<&'static str>,
     nav_hits: Vec<(Feature, Rect)>,
 }
 
-impl Default for State {
-    fn default() -> Self {
+impl State {
+    fn new(ctx: &LaunchContext) -> Self {
         Self {
             feature: Feature::Explorer,
+            views: Views::new(&ctx.cwd),
             labeled_as: None,
             nav_hits: Vec::new(),
         }
@@ -62,11 +67,12 @@ fn event_loop(
     nerd_font: &NerdFontSupport,
     ctx: &LaunchContext,
 ) -> io::Result<()> {
-    let mut state = State::default();
+    let mut state = State::new(ctx);
     let use_nf = nerd_font.should_use_icons();
 
     // Initial Herdr border title = active feature.
     sync_pane_label(&mut state, ctx);
+    state.views.get_mut(state.feature).on_activate();
 
     loop {
         terminal.draw(|frame| {
@@ -85,16 +91,23 @@ fn event_loop(
                     break;
                 }
                 if state.feature != before {
+                    state.views.get_mut(state.feature).on_activate();
                     sync_pane_label(&mut state, ctx);
                 }
             }
             Event::Mouse(m) => {
                 if matches!(m.kind, MouseEventKind::Down(MouseButton::Left)) {
                     let before = state.feature;
-                    handle_click(&mut state, m.column, m.row);
+                    if !handle_activity_click(&mut state, m.column, m.row) {
+                        // Not an activity hit — body may handle later.
+                        let _ = state.views.get_mut(state.feature).on_mouse(m);
+                    }
                     if state.feature != before {
+                        state.views.get_mut(state.feature).on_activate();
                         sync_pane_label(&mut state, ctx);
                     }
+                } else {
+                    let _ = state.views.get_mut(state.feature).on_mouse(m);
                 }
             }
             _ => {}
@@ -113,40 +126,44 @@ fn sync_pane_label(state: &mut State, ctx: &LaunchContext) {
     if ok {
         state.labeled_as = Some(title);
     }
-    // If rename failed (standalone / herdr not ready), leave labeled_as unset
-    // so the next feature switch or loop can retry.
 }
 
+/// Shell keys first; everything else goes to the active feature body.
 /// Returns true if the event loop should quit.
 fn handle_key(state: &mut State, code: KeyCode, mods: KeyModifiers) -> bool {
+    // --- shell chords (never stolen by features) ---
     match code {
         KeyCode::Char('q') => return true,
         KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => return true,
-        // Esc does not quit the sidebar (herdr-sidebar closes preview instead).
-        KeyCode::Esc => {}
+        // Esc reserved for closing preview later; not quit.
+        KeyCode::Esc => return false,
 
+        // Feature switch: digits only (Explorer needs j/k for lists).
         KeyCode::Char(c @ '1'..='3') => {
             if let Some(f) = Feature::from_digit(c) {
                 state.feature = f;
             }
+            return false;
         }
-        KeyCode::Char('j') | KeyCode::Down => state.feature = state.feature.next(),
-        KeyCode::Char('k') | KeyCode::Up => state.feature = state.feature.prev(),
-        KeyCode::Tab => state.feature = state.feature.next(),
-        KeyCode::BackTab => state.feature = state.feature.prev(),
-
         _ => {}
+    }
+
+    // --- body ---
+    match state.views.get_mut(state.feature).on_key(code, mods) {
+        KeyOutcome::Handled | KeyOutcome::Ignored => {}
     }
     false
 }
 
-fn handle_click(state: &mut State, col: u16, row: u16) {
+/// Returns true if the click hit the activity strip (feature switch).
+fn handle_activity_click(state: &mut State, col: u16, row: u16) -> bool {
     for (feature, rect) in &state.nav_hits {
         if ui::hit(*rect, col, row) {
             state.feature = *feature;
-            return;
+            return true;
         }
     }
+    false
 }
 
 fn draw(
@@ -178,55 +195,8 @@ fn draw(
     let bar = ui::draw_activity(frame, activity, &items, state.feature, palette);
     state.nav_hits = bar.hits;
 
-    draw_body(frame, body, state.feature, palette, ctx);
+    state.views.get(state.feature).draw(frame, body, palette);
     draw_footer(frame, footer, palette, nerd_font, state.feature, ctx);
-}
-
-fn draw_body(
-    frame: &mut Frame,
-    area: Rect,
-    feature: Feature,
-    palette: &Palette,
-    ctx: &LaunchContext,
-) {
-    if area.height == 0 {
-        return;
-    }
-    let title = Paragraph::new(Line::from(Span::styled(
-        format!(" {}", feature.title()),
-        Style::default()
-            .fg(palette.subtext0)
-            .bg(palette.panel_bg)
-            .add_modifier(Modifier::BOLD),
-    )));
-    frame.render_widget(
-        title,
-        Rect {
-            x: area.x,
-            y: area.y,
-            width: area.width,
-            height: 1,
-        },
-    );
-
-    if area.height < 3 {
-        return;
-    }
-    let body = Rect {
-        x: area.x.saturating_add(1),
-        y: area.y.saturating_add(2),
-        width: area.width.saturating_sub(2),
-        height: area.height.saturating_sub(2),
-    };
-    let placeholder = match feature {
-        Feature::Explorer => format!("file tree goes here\n{}", ctx.cwd.display()),
-        Feature::Scm => "git changes go here".into(),
-        Feature::GitHub => "issues / PRs go here".into(),
-    };
-    frame.render_widget(
-        Paragraph::new(placeholder).style(Style::default().fg(palette.overlay1)),
-        body,
-    );
 }
 
 fn draw_footer(

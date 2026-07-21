@@ -1,10 +1,17 @@
-//! Workbench features shown on the left (Explorer / SCM / GitHub).
+//! Feature identity + view mount points.
 //!
-//! The shell only switches which feature is active. Real content mounts later;
-//! this module owns identity, labels, icons, and key bindings for the activity
-//! bar.
+//! The shell switches which [`Feature`] is active; each feature implements
+//! [`view::FeatureView`] for body draw / key / click handling. Activity-bar
+//! icons and digit shortcuts stay on the id enum.
 
-/// A left-side workbench feature (activity-bar item).
+mod placeholder;
+mod view;
+
+pub use view::{FeatureView, KeyOutcome};
+
+use placeholder::PlaceholderView;
+
+/// A sidebar feature (activity-bar item).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Feature {
     #[default]
@@ -40,12 +47,9 @@ impl Feature {
     pub fn icon(self, nerd_font: bool) -> &'static str {
         if nerd_font {
             match self {
-                // nf-fa-folder
-                Feature::Explorer => "\u{f07b}",
-                // nf-fa-code_fork
-                Feature::Scm => "\u{f126}",
-                // nf-fa-github
-                Feature::GitHub => "\u{f09b}",
+                Feature::Explorer => "\u{f07b}", // nf-fa-folder
+                Feature::Scm => "\u{f126}",      // nf-fa-code_fork
+                Feature::GitHub => "\u{f09b}",   // nf-fa-github
             }
         } else {
             match self {
@@ -61,7 +65,7 @@ impl Feature {
         nerd_font
     }
 
-    /// Digit shortcut: `1` / `2` / `3`.
+    /// Digit shortcut: `1` / `2` / `3` (shell-owned feature switch).
     pub fn from_digit(c: char) -> Option<Feature> {
         match c {
             '1' => Some(Feature::Explorer),
@@ -82,13 +86,40 @@ impl Feature {
     pub fn from_index(i: usize) -> Option<Feature> {
         Feature::ALL.get(i).copied()
     }
+}
 
-    pub fn next(self) -> Feature {
-        Feature::from_index((self.index() + 1) % Feature::ALL.len()).unwrap()
+/// All feature view instances owned by the shell.
+pub struct Views {
+    explorer: PlaceholderView,
+    scm: PlaceholderView,
+    github: PlaceholderView,
+}
+
+impl Views {
+    pub fn new(cwd: &std::path::Path) -> Self {
+        Self {
+            explorer: PlaceholderView::new(
+                Feature::Explorer,
+                format!("file tree goes here\n{}", cwd.display()),
+            ),
+            scm: PlaceholderView::new(Feature::Scm, "git changes go here".into()),
+            github: PlaceholderView::new(Feature::GitHub, "issues / PRs go here".into()),
+        }
     }
 
-    pub fn prev(self) -> Feature {
-        let n = Feature::ALL.len();
-        Feature::from_index((self.index() + n - 1) % n).unwrap()
+    pub fn get(&self, feature: Feature) -> &dyn FeatureView {
+        match feature {
+            Feature::Explorer => &self.explorer,
+            Feature::Scm => &self.scm,
+            Feature::GitHub => &self.github,
+        }
+    }
+
+    pub fn get_mut(&mut self, feature: Feature) -> &mut dyn FeatureView {
+        match feature {
+            Feature::Explorer => &mut self.explorer,
+            Feature::Scm => &mut self.scm,
+            Feature::GitHub => &mut self.github,
+        }
     }
 }
