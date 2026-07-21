@@ -27,9 +27,6 @@ use ratatui::{Frame, Terminal};
 use std::io::{self, Stdout};
 use std::time::Duration;
 
-/// Columns per activity icon chip (padding + glyph + padding).
-const NAV_BTN_WIDTH: u16 = 5;
-
 struct State {
     feature: Feature,
     /// Last label pushed to Herdr (avoid spamming rename every frame).
@@ -194,69 +191,93 @@ fn draw_activity(
     use_nf: bool,
     palette: &Palette,
 ) {
-    // Soft underline under the activity strip.
-    let chip_h = area.height.saturating_sub(1).max(1);
-    if area.height > 0 {
-        let line_y = area.y.saturating_add(area.height.saturating_sub(1));
-        frame.render_widget(
-            Paragraph::new("─".repeat(area.width as usize))
-                .style(Style::default().fg(palette.overlay0).bg(palette.panel_bg)),
-            Rect {
-                x: area.x,
-                y: line_y,
-                width: area.width,
-                height: 1,
-            },
-        );
+    // herdr-sidebar pattern:
+    //   activity strip is 3 rows tall
+    //   icons live on the MIDDLE row only
+    //   selected chip grows with half-block caps (▄ top / ▀ bottom)
+    // so the glyph sits visually centered in a tall button.
+    if area.height < 3 || area.width == 0 {
+        return;
     }
 
-    let mut x = area.x.saturating_add(1);
+    let outer_top = area.y;
+    let mid_y = area.y + 1;
+    let outer_bottom = area.y + 2;
+    let mid = Rect::new(area.x, mid_y, area.width, 1);
+
+    // Build one middle-row line of spans: " {icon}{slack} " chips with gaps.
+    // Material FA glyphs are often 2 cells wide — reserve a slack cell so chips
+    // stay equal and icons center (same as herdr-sidebar).
+    let mut spans: Vec<Span> = Vec::new();
+    spans.push(Span::raw(" "));
+    let mut chip_bounds: Vec<(Feature, u16, u16)> = Vec::new(); // feature, start_x, end_x relative to mid.x
+    let mut col: u16 = 1; // after leading space
 
     for feature in Feature::ALL {
-        let avail = area.x.saturating_add(area.width).saturating_sub(x);
-        if avail < 3 {
-            break;
-        }
-        let w = NAV_BTN_WIDTH.min(avail);
-        let selected = feature == state.feature;
         let icon = feature.icon(use_nf);
-
-        // Selected: chip background. Idle: theme main text (white-ish), no chip.
-        let (fg, bg) = if selected {
-            (palette.text, palette.surface1)
+        let slack = if feature.icon_double_width(use_nf) {
+            " "
         } else {
-            (palette.text, palette.panel_bg)
+            ""
         };
-        let style = Style::default().fg(fg).bg(bg).add_modifier(if selected {
-            Modifier::BOLD
+        let selected = feature == state.feature;
+        let label = format!(" {icon}{slack} ");
+        let style = if selected {
+            Style::default()
+                .fg(palette.text)
+                .bg(palette.surface1)
+                .add_modifier(Modifier::BOLD)
         } else {
-            Modifier::empty()
-        });
-
-        let chip = Rect {
-            x,
-            y: area.y,
-            width: w,
-            height: chip_h,
+            // Idle: theme main text ("white"), no chip background.
+            Style::default().fg(palette.text)
         };
-        // Paint the whole chip so the glyph sits on a solid block when selected.
-        frame.render_widget(Block::default().style(Style::default().bg(bg)), chip);
+        let span = Span::styled(label, style);
+        let w = span.width() as u16;
+        let start = col;
+        let end = col.saturating_add(w);
+        chip_bounds.push((feature, start, end));
+        spans.push(span);
+        spans.push(Span::raw(" "));
+        col = end.saturating_add(1);
+    }
 
-        // Center glyph both horizontally and vertically inside the chip.
-        let glyph = Rect {
-            x: chip.x.saturating_add(chip.width.saturating_sub(1) / 2),
-            y: chip.y.saturating_add(chip.height.saturating_sub(1) / 2),
-            width: 1,
-            height: 1,
-        };
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(icon, style)))
-                .alignment(ratatui::layout::Alignment::Center),
-            glyph,
-        );
+    // Half-block caps only on the selected chip — tall button, icon on middle.
+    if let Some((_, start, end)) = chip_bounds
+        .iter()
+        .find(|(f, _, _)| *f == state.feature)
+    {
+        let chip_x = mid.x.saturating_add(*start);
+        let chip_w = end.saturating_sub(*start);
+        if chip_w > 0 {
+            let mut paint_cap = |glyph: &str, y: u16| {
+                frame.render_widget(
+                    Paragraph::new(glyph.repeat(usize::from(chip_w))).style(
+                        Style::default()
+                            .fg(palette.surface1)
+                            .bg(palette.panel_bg),
+                    ),
+                    Rect::new(chip_x, y, chip_w, 1),
+                );
+            };
+            paint_cap("▄", outer_top);
+            paint_cap("▀", outer_bottom);
+        }
+    }
 
-        state.nav_hits.push((feature, chip));
-        x = x.saturating_add(w.saturating_add(1));
+    frame.render_widget(Paragraph::new(Line::from(spans)), mid);
+
+    // Hit targets cover the full 3-row tall button for easier clicking.
+    for (feature, start, end) in chip_bounds {
+        let w = end.saturating_sub(start).max(1);
+        state.nav_hits.push((
+            feature,
+            Rect {
+                x: mid.x.saturating_add(start),
+                y: outer_top,
+                width: w,
+                height: 3,
+            },
+        ));
     }
 }
 

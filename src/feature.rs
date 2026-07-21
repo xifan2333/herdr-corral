@@ -34,13 +34,16 @@ impl Feature {
     }
 
     /// Activity-bar glyph. Prefer Nerd Font; plain ASCII when unavailable.
+    ///
+    /// Material icons match herdr-sidebar's FA set (often **two cells** wide in
+    /// non-Mono Nerd Fonts — callers should reserve a slack cell).
     pub fn icon(self, nerd_font: bool) -> &'static str {
         if nerd_font {
             match self {
-                // nf-cod-files / explorer-ish
-                Feature::Explorer => "\u{eb0f}",
-                // nf-cod-source_control
-                Feature::Scm => "\u{ea68}",
+                // nf-fa-folder
+                Feature::Explorer => "\u{f07b}",
+                // nf-fa-code_fork
+                Feature::Scm => "\u{f126}",
                 // nf-fa-github
                 Feature::GitHub => "\u{f09b}",
             }
@@ -51,6 +54,11 @@ impl Feature {
                 Feature::GitHub => "G",
             }
         }
+    }
+
+    /// True when the Nerd glyph is typically double-width (needs a slack cell).
+    pub fn icon_double_width(self, nerd_font: bool) -> bool {
+        nerd_font
     }
 
     /// Digit shortcut: `1` / `2` / `3`.
