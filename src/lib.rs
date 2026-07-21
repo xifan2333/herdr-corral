@@ -11,14 +11,16 @@
 //! - [`app`] is the host event loop / shell
 
 pub mod app;
+pub mod feature;
 pub mod host;
 pub mod icons;
 pub mod layout;
 pub mod theme;
 
+pub use feature::Feature;
 pub use host::{LaunchContext, Mode};
 pub use icons::{NerdFontSupport, has_nerd_font};
-pub use layout::{Containers, Focus, PanelView};
+pub use layout::{Focus, PanelView, Regions};
 pub use theme::Palette;
 
 /// Entry point invoked by the binary (plugin pane or standalone).
