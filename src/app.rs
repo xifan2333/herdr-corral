@@ -10,12 +10,9 @@
 //! - **active feature body**: everything else (`j`/`k`, …) via [`FeatureView`]
 
 use crate::feature::{Feature, KeyOutcome, Views};
-use crate::herdr_cli;
+use crate::herdr;
 use crate::host::LaunchContext;
-use crate::icons::{self, NerdFontSupport};
-use crate::layout;
-use crate::theme::Palette;
-use crate::ui::{self, ActivityItem};
+use crate::ui::{self, ActivityItem, NerdFontSupport, Palette};
 use crossterm::event::{
     self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
@@ -55,7 +52,7 @@ pub fn run(ctx: LaunchContext) -> io::Result<()> {
     let _ = std::env::set_current_dir(&ctx.cwd);
 
     let palette = Palette::resolve();
-    let nerd_font = icons::detect();
+    let nerd_font = ui::detect_nerd_font();
     // TermGuard restores the terminal on Drop (normal return *and* panic).
     let mut term = TermGuard::enter()?;
     event_loop(term.terminal(), &palette, &nerd_font, &ctx)
@@ -122,7 +119,7 @@ fn sync_pane_label(state: &mut State, ctx: &LaunchContext) {
         return;
     }
     // Only rename *this* pane. Never fall back to invocation-focused neighbor.
-    let ok = herdr_cli::set_pane_label(ctx.herdr_bin(), ctx.self_pane_id(), title);
+    let ok = herdr::set_pane_label(ctx.herdr_bin(), ctx.self_pane_id(), title);
     if ok {
         state.labeled_as = Some(title);
     }
@@ -182,7 +179,7 @@ fn draw(
         area,
     );
 
-    let (activity, body, footer) = layout::split_sidebar(area, true);
+    let (activity, body, footer) = ui::layout::split_sidebar(area, true);
 
     let items: Vec<ActivityItem> = Feature::ALL
         .iter()

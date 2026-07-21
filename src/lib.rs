@@ -8,26 +8,20 @@
 //!
 //! Modules:
 //! - [`host`] — plugin vs standalone launch context
-//! - [`theme`] — Herdr palette (or terminal fallback)
-//! - [`icons`] — Nerd Font detection
-//! - [`feature`] — Explorer / SCM / GitHub identity + [`feature::FeatureView`]
-//! - [`layout`] — sidebar strip geometry
-//! - [`ui`] — terminal UI primitives (activity chips, hit tests)
+//! - [`herdr`] — host CLI / future RPC (`herdr::cli`)
+//! - [`ui`] — palette, icons, layout, activity strip
+//! - [`feature`] — Explorer / SCM / GitHub + [`feature::FeatureView`]
 //! - [`app`] — sidebar event loop / key routing
 
 pub mod app;
 pub mod feature;
-pub mod herdr_cli;
+pub mod herdr;
 pub mod host;
-pub mod icons;
-pub mod layout;
-pub mod theme;
 pub mod ui;
 
 pub use feature::{Feature, FeatureView, KeyOutcome};
 pub use host::{LaunchContext, Mode};
-pub use icons::{NerdFontSupport, has_nerd_font};
-pub use theme::Palette;
+pub use ui::{NerdFontSupport, Palette, has_nerd_font};
 
 /// Entry point invoked by the binary (plugin pane or standalone).
 pub fn run() -> std::io::Result<()> {

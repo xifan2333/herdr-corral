@@ -1,6 +1,9 @@
-//! Best-effort calls to the Herdr CLI via `HERDR_BIN_PATH`.
+//! Calls into the Herdr host via `HERDR_BIN_PATH` (and later the socket API).
 //!
-//! Standalone mode has no herdr — callers should treat `false` as "skip".
+//! This is the only process-spawn / host-RPC boundary for Corral. Pane labels
+//! are just one operation; open preview, resize, metadata, etc. land here too.
+//!
+//! Standalone mode has no herdr — callers treat `false` / `None` as "skip".
 //! Never panics.
 
 use std::path::Path;

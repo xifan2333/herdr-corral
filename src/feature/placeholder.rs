@@ -2,7 +2,7 @@
 
 use super::Feature;
 use super::view::{FeatureView, KeyOutcome};
-use crate::theme::Palette;
+use crate::ui::Palette;
 use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::Rect;

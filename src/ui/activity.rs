@@ -17,7 +17,7 @@
 //! centered (again matching herdr-sidebar).
 
 use crate::feature::Feature;
-use crate::theme::Palette;
+use super::theme::Palette;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};

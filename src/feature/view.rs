@@ -3,7 +3,7 @@
 //! The shell owns activity switching (`1`/`2`/`3`, icon clicks) and terminal
 //! setup. Each feature owns its body keys (`j`/`k`, …) and drawing.
 
-use crate::theme::Palette;
+use crate::ui::Palette;
 use crossterm::event::{KeyCode, KeyModifiers, MouseEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
