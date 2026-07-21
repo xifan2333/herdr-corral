@@ -51,10 +51,9 @@ pub fn run(ctx: LaunchContext) -> io::Result<()> {
 
     let palette = Palette::resolve();
     let nerd_font = icons::detect();
-    let mut terminal = setup()?;
-    let result = event_loop(&mut terminal, &palette, &nerd_font, &ctx);
-    restore(&mut terminal)?;
-    result
+    // TermGuard restores the terminal on Drop (normal return *and* panic).
+    let mut term = TermGuard::enter()?;
+    event_loop(term.terminal(), &palette, &nerd_font, &ctx)
 }
 
 fn event_loop(
@@ -259,27 +258,70 @@ fn draw_footer(
     );
 }
 
-fn setup() -> io::Result<Terminal<CrosstermBackend<Stdout>>> {
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    // Colors are UI, not pipeable output — ignore NO_COLOR from agent shells
-    // (same rationale as herdr-sidebar).
-    crossterm::style::force_color_output(true);
-    execute!(
-        stdout,
-        EnterAlternateScreen,
-        crossterm::event::EnableMouseCapture
-    )?;
-    Terminal::new(CrosstermBackend::new(stdout))
+/// Owns terminal raw mode / alt screen / mouse capture and always tears them
+/// down in [`Drop`], including on panic paths through `event_loop`.
+struct TermGuard {
+    terminal: Terminal<CrosstermBackend<Stdout>>,
+    /// Set after a successful explicit restore so Drop is a no-op.
+    restored: bool,
 }
 
-fn restore(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<()> {
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        crossterm::event::DisableMouseCapture,
-        LeaveAlternateScreen
-    )?;
-    terminal.show_cursor()?;
-    Ok(())
+impl TermGuard {
+    fn enter() -> io::Result<Self> {
+        enable_raw_mode()?;
+        let mut stdout = io::stdout();
+        // Colors are UI, not pipeable output — ignore NO_COLOR from agent shells
+        // (same rationale as herdr-sidebar).
+        crossterm::style::force_color_output(true);
+        // If alt-screen / mouse setup fails after raw mode is on, leave raw mode.
+        if let Err(e) = execute!(
+            stdout,
+            EnterAlternateScreen,
+            crossterm::event::EnableMouseCapture
+        ) {
+            let _ = disable_raw_mode();
+            return Err(e);
+        }
+        match Terminal::new(CrosstermBackend::new(stdout)) {
+            Ok(terminal) => Ok(Self {
+                terminal,
+                restored: false,
+            }),
+            Err(e) => {
+                let mut out = io::stdout();
+                let _ = execute!(
+                    out,
+                    crossterm::event::DisableMouseCapture,
+                    LeaveAlternateScreen
+                );
+                let _ = disable_raw_mode();
+                Err(e)
+            }
+        }
+    }
+
+    fn terminal(&mut self) -> &mut Terminal<CrosstermBackend<Stdout>> {
+        &mut self.terminal
+    }
+
+    fn restore_now(&mut self) {
+        if self.restored {
+            return;
+        }
+        // Best-effort: each step independent so one failure does not skip the rest.
+        let _ = disable_raw_mode();
+        let _ = execute!(
+            self.terminal.backend_mut(),
+            crossterm::event::DisableMouseCapture,
+            LeaveAlternateScreen
+        );
+        let _ = self.terminal.show_cursor();
+        self.restored = true;
+    }
+}
+
+impl Drop for TermGuard {
+    fn drop(&mut self) {
+        self.restore_now();
+    }
 }
