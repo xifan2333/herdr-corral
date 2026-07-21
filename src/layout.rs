@@ -59,11 +59,14 @@ pub fn split(area: Rect, left_pct: u16) -> Regions {
     }
 }
 
-/// Split a left panel's inner area into: horizontal nav row | feature body.
+/// Height of the left-panel feature nav strip (icon row + vertical padding).
+pub const NAV_HEIGHT: u16 = 3;
+
+/// Split a left panel's inner area into: horizontal nav strip | feature body.
 pub fn split_left_nav(inner: Rect) -> (Rect, Rect) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(1)])
+        .constraints([Constraint::Length(NAV_HEIGHT), Constraint::Min(1)])
         .split(inner);
     (rows[0], rows[1])
 }

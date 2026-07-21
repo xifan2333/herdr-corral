@@ -27,8 +27,8 @@ use std::time::Duration;
 /// Left container share of width (percent).
 const LEFT_PCT: u16 = 32;
 
-/// Columns reserved per nav icon button (icon + spacing).
-const NAV_BTN_WIDTH: u16 = 3;
+/// Columns per nav icon button (padding + glyph + padding) — reads larger.
+const NAV_BTN_WIDTH: u16 = 5;
 
 struct State {
     feature: Feature,
@@ -280,7 +280,8 @@ fn draw_left_panel(
     }
 }
 
-/// Horizontal Nerd Font buttons inside the left panel (screenshot style).
+/// Horizontal Nerd Font buttons inside the left panel.
+/// Selected item: filled background chip; unselected: muted glyph only.
 fn draw_feature_nav(
     frame: &mut Frame,
     area: Rect,
@@ -288,43 +289,58 @@ fn draw_feature_nav(
     use_nf: bool,
     palette: &Palette,
 ) {
+    // Vertical center of the nav strip (NAV_HEIGHT is typically 3).
+    let icon_y = area.y.saturating_add(area.height.saturating_sub(1) / 2);
     let mut x = area.x.saturating_add(1);
+
     for feature in Feature::ALL {
-        if x.saturating_add(1) > area.x.saturating_add(area.width) {
+        let avail = area
+            .x
+            .saturating_add(area.width)
+            .saturating_sub(x);
+        if avail < 3 {
             break;
         }
+        let w = NAV_BTN_WIDTH.min(avail);
         let selected = feature == state.feature;
         let icon = feature.icon(use_nf);
-        let style = if selected {
-            Style::default()
-                .fg(palette.accent)
-                .bg(palette.panel_bg)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-                .fg(palette.overlay1)
-                .bg(palette.panel_bg)
-        };
 
-        let btn = Rect {
+        let (fg, bg) = if selected {
+            // Accent text on a solid chip so the active feature reads clearly.
+            (palette.text, palette.surface1)
+        } else {
+            (palette.overlay1, palette.panel_bg)
+        };
+        let style = Style::default().fg(fg).bg(bg).add_modifier(if selected {
+            Modifier::BOLD
+        } else {
+            Modifier::empty()
+        });
+
+        // Full chip background across button width (and full nav strip height for hit feel).
+        let chip = Rect {
             x,
             y: area.y,
+            width: w,
+            height: area.height.max(1),
+        };
+        frame.render_widget(Block::default().style(Style::default().bg(bg)), chip);
+
+        // Center the glyph inside the chip.
+        let glyph_x = x.saturating_add(w.saturating_sub(1) / 2);
+        let glyph = Rect {
+            x: glyph_x,
+            y: icon_y,
             width: 1,
             height: 1,
         };
-        frame.render_widget(Paragraph::new(Line::from(Span::styled(icon, style))), btn);
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(icon, style))),
+            glyph,
+        );
 
-        // Wider hit target for clicking.
-        state.nav_hits.push((
-            feature,
-            Rect {
-                x,
-                y: area.y,
-                width: NAV_BTN_WIDTH.min(area.width.saturating_sub(x.saturating_sub(area.x))),
-                height: 1,
-            },
-        ));
-        x = x.saturating_add(NAV_BTN_WIDTH);
+        state.nav_hits.push((feature, chip));
+        x = x.saturating_add(w.saturating_add(1)); // 1-col gap between chips
     }
 }
 
