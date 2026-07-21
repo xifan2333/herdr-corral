@@ -82,20 +82,23 @@ impl Config {
     /// Env always includes `CORRAL_*` and passes through `HERDR_*` from the
     /// process environment. `$1` is the file path when present.
     ///
-    /// Returns whether the process exited successfully.
+    /// The action may print `CORRAL_SUSPEND=0|1` on stdout to tell the TUI
+    /// whether to leave the alternate screen (standalone editors need 1).
     pub fn run_shell(
         &self,
         action: &str,
         file: Option<&Path>,
         extra_env: &[(&str, String)],
-    ) -> bool {
-        // Validate action name: shell function identifier.
+        inherit_tty: bool,
+    ) -> ShellResult {
         if !is_safe_fn_name(action) {
-            return false;
+            return ShellResult {
+                ok: false,
+                suspend: inherit_tty,
+            };
         }
 
         let mut cmd = Command::new("bash");
-        // Source user config, then call the action function with "$@".
         cmd.arg("-c").arg(format!(
             "set -euo pipefail\n{source}\n{action} \"$@\"\n",
             source = self.source,
@@ -119,14 +122,51 @@ impl Config {
             cmd.env(k, v);
         }
 
-        // Inherit stdio so $EDITOR / herdr can use the TTY when the TUI is suspended.
-        cmd.stdin(Stdio::inherit())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
+        if inherit_tty {
+            // Standalone $EDITOR needs the real TTY.
+            let ok = cmd
+                .stdin(Stdio::inherit())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            return ShellResult {
+                ok,
+                suspend: true,
+            };
+        }
+
+        // Hosted: capture stdout for CORRAL_SUSPEND=*; keep TUI up by default.
+        let output = cmd
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output();
+        match output {
+            Ok(out) => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let suspend = stdout.lines().any(|l| l.trim() == "CORRAL_SUSPEND=1");
+                // Explicit 0 wins as default when mixed; only 1 requests suspend.
+                ShellResult {
+                    ok: out.status.success(),
+                    suspend,
+                }
+            }
+            Err(_) => ShellResult {
+                ok: false,
+                suspend: false,
+            },
+        }
     }
+}
+
+/// Outcome of running a config.sh action.
+#[derive(Clone, Copy, Debug)]
+pub struct ShellResult {
+    pub ok: bool,
+    /// Caller should leave alt-screen while the action runs (standalone editor).
+    pub suspend: bool,
 }
 
 fn config_dir() -> PathBuf {
@@ -202,9 +242,17 @@ pub fn key_token(code: crossterm::event::KeyCode) -> Option<String> {
 /// Default config when the user has not created one yet.
 pub const DEFAULT_CONFIG: &str = r#"# Corral config (shell). Not executed at startup — sourced when an action runs.
 # bind <key> <action>
-#   internal: up down top bottom toggle collapse refresh
+#   internal: up down top bottom toggle collapse refresh open
 #   shell:    any other name = function of that name below
 # Split modules yourself:  source "${CORRAL_CONFIG_DIR}/git.sh"
+#
+# Env when an action runs:
+#   CORRAL_FILE CORRAL_DIR CORRAL_CONFIG_DIR CORRAL_ACTION
+#   HERDR_BIN_PATH HERDR_ENV HERDR_PANE_ID (when hosted)
+#
+# Return convention for shell actions:
+#   echo CORRAL_SUSPEND=0  — keep the TUI up (default for Herdr pane ops)
+#   echo CORRAL_SUSPEND=1  — TUI leaves alt-screen (standalone $EDITOR)
 
 bind j down
 bind down down
@@ -219,20 +267,32 @@ bind right toggle
 bind enter toggle
 bind r refresh
 
-# Open selected file in $EDITOR (Herdr: new split; standalone: this TTY).
+# Open selected file in $EDITOR.
+# Herdr: split a shell pane, then send-text the editor command (split cannot take argv).
+# Standalone: run $EDITOR on this TTY (request suspend).
 open() {
   local file="${1:-${CORRAL_FILE:-}}"
   [[ -n "$file" && -e "$file" ]] || return 1
   local editor="${EDITOR:-${VISUAL:-vi}}"
+
   if [[ -n "${HERDR_BIN_PATH:-}" && -n "${HERDR_ENV:-}" ]]; then
-    # shellcheck disable=SC2086
-    exec "$HERDR_BIN_PATH" pane split --current --direction right --focus -- \
-      sh -c "$editor \"\$1\"" _ "$file"
+    echo CORRAL_SUSPEND=0
+    local herdr="$HERDR_BIN_PATH"
+    # Prefer splitting beside the focused neighbor if known; else --current.
+    local out pid
+    out="$("$herdr" pane split --current --direction right --focus --ratio 0.55 2>&1)" || return 1
+    pid="$(printf '%s' "$out" | sed -n 's/.*"pane_id":"\([^"]*\)".*/\1/p' | head -1)"
+    [[ -n "$pid" ]] || return 1
+    # Quote path for the remote shell; editor may contain spaces (e.g. "code -w").
+    local qfile
+    qfile=$(printf '%q' "$file")
+    "$herdr" pane send-text "$pid" "$editor $qfile" >/dev/null
+    "$herdr" pane send-keys "$pid" enter >/dev/null
+    return 0
   fi
+
+  echo CORRAL_SUSPEND=1
   # shellcheck disable=SC2086
   exec $editor "$file"
 }
-
-# Explorer: open files via the open() function above.
-# (toggle on a file calls open; on a dir expands/collapses in-process.)
 "#;

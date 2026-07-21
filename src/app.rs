@@ -138,7 +138,19 @@ fn run_shell_action(
     action: &str,
     file: Option<&std::path::Path>,
 ) -> io::Result<()> {
-    // Leave alt-screen so $EDITOR / herdr pane can use a normal TTY.
+    // Hosted Herdr actions (split/send-text) must NOT leave the alt-screen — that
+    // flash is what users see when open fails or only needs the herdr CLI.
+    // Standalone $EDITOR still needs a real TTY: probe first with a dry convention
+    // by checking HERDR_ENV, or let the action request suspend via stdout.
+    let hosted = std::env::var_os("HERDR_ENV").is_some();
+
+    if hosted {
+        // Keep TUI up; capture action stdout/stderr.
+        let _ = state.config.run_shell(action, file, &[], false);
+        return Ok(());
+    }
+
+    // Standalone: suspend TUI for $EDITOR.
     let _ = disable_raw_mode();
     let _ = execute!(
         terminal.backend_mut(),
@@ -147,9 +159,8 @@ fn run_shell_action(
     );
     let _ = terminal.show_cursor();
 
-    let _ok = state.config.run_shell(action, file, &[]);
+    let _ = state.config.run_shell(action, file, &[], true);
 
-    // Re-enter TUI.
     enable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
