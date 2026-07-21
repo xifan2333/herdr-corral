@@ -1,0 +1,24 @@
+[package]
+name = "corral"
+version = "0.1.0"
+edition = "2021"
+description = "VS Code-style terminal workbench plugin for Herdr"
+license = "MIT"
+
+# Reusable library: `corral::theme` resolves Herdr's palette so every component
+# (explorer / scm / github) shares one color source.
+[lib]
+name = "corral"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+# Same color type Herdr uses; its serde impl serializes colors to strings
+# ("#282A36", "Blue", "Reset") — no hand-rolled formatting.
+ratatui = { version = "0.29", default-features = false, features = ["serde"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true

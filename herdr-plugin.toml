@@ -1,0 +1,16 @@
+id = "corral"
+name = "Corral"
+version = "0.1.0"
+min_herdr_version = "0.7.0"
+description = "VS Code-style terminal workbench for Herdr"
+platforms = ["linux", "macos"]
+
+# GitHub `plugin install` builds the Rust binary here. `plugin link` (local dev)
+# does NOT run build — build it yourself with `cargo build --release`.
+[[build]]
+command = ["cargo", "build", "--release"]
+
+# No user-facing entrypoints yet. `corral::theme` is an internal color module:
+# it resolves Herdr's current UI theme palette deterministically (ported from
+# Herdr's own theme tables, read from its config.toml) so upcoming components
+# share one color source. Actions / panes get added here as those components land.
