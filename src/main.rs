@@ -1,7 +1,7 @@
 //! Thin binary over the `corral` library.
 //!
-//! Herdr runs this as the plugin pane command. No subcommands for now — open
-//! the host shell and draw the left/right containers.
+//! - standalone: `./target/release/corral` or `cargo run --release`
+//! - plugin: Herdr runs the same binary as the workbench pane command
 
 fn main() -> std::io::Result<()> {
     corral::run()

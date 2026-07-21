@@ -1,24 +1,22 @@
-//! Find Herdr's current UI theme color table and expose it. That's the whole job.
+//! Find a UI theme color table and expose it. That's the whole job.
 //!
-//! Herdr does not expose its resolved theme over the CLI or socket API, so we
-//! mirror Herdr's own theme tables (ported verbatim from `herdr/src/app/state.rs`
-//! + `src/config/theme.rs`, v0.7.4) and resolve exactly like Herdr does:
+//! When Herdr's config is available we mirror Herdr's own theme tables (ported
+//! from `herdr/src/app/state.rs` + `src/config/theme.rs`, v0.7.4):
 //!
-//!   1. read `[theme]` from Herdr's `config.toml`
-//!      (`name` / `auto_switch` / `dark_name` / `light_name` / `[theme.custom]`),
+//!   1. read `[theme]` from Herdr's `config.toml`,
 //!   2. look up the named built-in palette,
 //!   3. apply `[theme.custom]` overrides.
 //!
-//! Colors are [`ratatui::style::Color`] — the exact type Herdr uses. RGB themes
-//! carry true-color values; the `terminal` theme carries ANSI names (`Blue`,
-//! `Reset`, ...) that follow the terminal's own palette. Serialization is
-//! ratatui's own serde impl (`"#282a36"`, `"Blue"`, `"Reset"`).
+//! When that config is missing (standalone mode on a machine without Herdr),
+//! fall back to the built-in `terminal` palette so Corral still runs.
+//!
+//! Colors are [`ratatui::style::Color`]. Serialization uses ratatui's serde impl.
 //!
 //! # Usage
 //!
 //! ```no_run
 //! use corral::theme::Palette;
-//! let p = Palette::resolve();     // reads Herdr config, no tty needed
+//! let p = Palette::resolve();     // Herdr config if present, else terminal
 //! let accent = p.accent;          // ratatui::style::Color, ready for any TUI
 //! ```
 
@@ -49,20 +47,29 @@ pub struct Palette {
 }
 
 impl Palette {
-    /// Resolve the active theme exactly as Herdr would: read config, pick the
-    /// effective name, apply `[theme.custom]`.
+    /// Resolve the active theme.
+    ///
+    /// - Herdr config present → same resolution as Herdr (name + custom overrides)
+    /// - no Herdr config (standalone / missing install) → built-in `terminal` palette
     pub fn resolve() -> Palette {
-        let cfg = ThemeConfig::read();
-        // auto_switch needs host light/dark detection; without it we default to
-        // the dark name (Herdr's own default appearance).
-        let name = if cfg.auto_switch {
-            cfg.dark_name.clone().unwrap_or_else(|| cfg.effective_manual())
-        } else {
-            cfg.effective_manual()
-        };
-        let mut palette = from_name(&name).unwrap_or_else(catppuccin);
-        cfg.apply_overrides(&mut palette);
-        palette
+        match ThemeConfig::try_read() {
+            Some(cfg) => {
+                // auto_switch needs host light/dark detection; without it we default
+                // to the dark name (Herdr's own default appearance).
+                let name = if cfg.auto_switch {
+                    cfg.dark_name
+                        .clone()
+                        .unwrap_or_else(|| cfg.effective_manual())
+                } else {
+                    cfg.effective_manual()
+                };
+                let mut palette = from_name(&name).unwrap_or_else(catppuccin);
+                cfg.apply_overrides(&mut palette);
+                palette
+            }
+            // Standalone / no Herdr install: ANSI-named tokens follow the host terminal.
+            None => terminal(),
+        }
     }
 
     /// Resolve a built-in theme by name, ignoring config (previews/tests).
@@ -149,17 +156,17 @@ impl ThemeConfig {
         self.name.clone().unwrap_or_else(|| "catppuccin".into())
     }
 
-    /// Read and deserialize Herdr's config; empty config on any error.
-    fn read() -> ThemeConfig {
-        let Some(path) = herdr_config_path() else {
-            return ThemeConfig::default();
-        };
-        let Ok(text) = std::fs::read_to_string(path) else {
-            return ThemeConfig::default();
-        };
-        toml::from_str::<RootConfig>(&text)
-            .map(|c| c.theme)
-            .unwrap_or_default()
+    /// Read Herdr's theme config when the file exists and parses.
+    /// `None` means no Herdr config available (standalone fallback path).
+    fn try_read() -> Option<ThemeConfig> {
+        let path = herdr_config_path()?;
+        let text = std::fs::read_to_string(path).ok()?;
+        // File exists but parse fails → treat as empty theme section, not standalone.
+        Some(
+            toml::from_str::<RootConfig>(&text)
+                .map(|c| c.theme)
+                .unwrap_or_default(),
+        )
     }
 
     fn apply_overrides(&self, palette: &mut Palette) {

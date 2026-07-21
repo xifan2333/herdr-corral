@@ -1,8 +1,10 @@
 //! Single-pane host TUI: draw left + right containers and own the event loop.
 //!
-//! This is the corral shell. Future views mount into the containers; for now
-//! each container is just a themed empty shell so the layout skeleton is real.
+//! Works as a Herdr plugin pane *or* a standalone terminal binary. Host-specific
+//! details come from [`crate::host::LaunchContext`]; the shell itself does not
+//! require Herdr.
 
+use crate::host::LaunchContext;
 use crate::layout::{self, Focus};
 use crate::theme::Palette;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
@@ -22,10 +24,13 @@ use std::time::Duration;
 const LEFT_PCT: u16 = 30;
 
 /// Run the host TUI until the user quits.
-pub fn run() -> io::Result<()> {
+pub fn run(ctx: LaunchContext) -> io::Result<()> {
+    // Best-effort: root relative paths / future views at the launch cwd.
+    let _ = std::env::set_current_dir(&ctx.cwd);
+
     let palette = Palette::resolve();
     let mut terminal = setup()?;
-    let result = event_loop(&mut terminal, &palette);
+    let result = event_loop(&mut terminal, &palette, &ctx);
     restore(&mut terminal)?;
     result
 }
@@ -33,11 +38,12 @@ pub fn run() -> io::Result<()> {
 fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     palette: &Palette,
+    ctx: &LaunchContext,
 ) -> io::Result<()> {
     let mut focus = Focus::Left;
 
     loop {
-        terminal.draw(|frame| draw(frame, palette, focus))?;
+        terminal.draw(|frame| draw(frame, palette, focus, ctx))?;
 
         if !event::poll(Duration::from_millis(100))? {
             continue;
@@ -62,15 +68,21 @@ fn event_loop(
     Ok(())
 }
 
-fn draw(frame: &mut Frame, palette: &Palette, focus: Focus) {
+fn draw(frame: &mut Frame, palette: &Palette, focus: Focus, ctx: &LaunchContext) {
     let area = frame.area();
     let containers = layout::split(area, LEFT_PCT);
+
+    let left_body = format!(
+        "sidebar container\n(future: Explorer / SCM / GitHub)\n\ncwd: {}",
+        ctx.cwd.display()
+    );
+    let right_body = "main container\n(future views mount here)";
 
     draw_container(
         frame,
         containers.left,
         " left ",
-        "sidebar container\n(future: Explorer / SCM / GitHub)",
+        &left_body,
         focus == Focus::Left,
         palette,
     );
@@ -78,14 +90,15 @@ fn draw(frame: &mut Frame, palette: &Palette, focus: Focus) {
         frame,
         containers.right,
         " right ",
-        "main container\n(future views mount here)",
+        right_body,
         focus == Focus::Right,
         palette,
     );
 
-    // Bottom hint bar.
     let hint = format!(
-        " corral  focus={}  Tab focus  h/l left/right  q quit ",
+        " corral  mode={}  theme={}  focus={}  Tab focus  h/l  q quit ",
+        ctx.mode.label(),
+        palette.name,
         focus.label()
     );
     let bar = Paragraph::new(Line::from(Span::styled(
@@ -98,7 +111,6 @@ fn draw(frame: &mut Frame, palette: &Palette, focus: Focus) {
         width: area.width,
         height: 1,
     };
-    // Overwrite the bottom row of both containers with the status bar.
     frame.render_widget(bar, bar_area);
 }
 
@@ -110,7 +122,6 @@ fn draw_container(
     focused: bool,
     palette: &Palette,
 ) {
-    // Leave the bottom status row alone if this container reaches it.
     let area = if area.height > 0 {
         ratatui::layout::Rect {
             height: area.height.saturating_sub(1),
