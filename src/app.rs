@@ -12,7 +12,7 @@
 use crate::feature::{Feature, KeyOutcome, Views};
 use crate::herdr;
 use crate::host::LaunchContext;
-use crate::ui::{self, ActivityItem, NerdFontSupport, Palette};
+use crate::ui::{self, ActivityItem, Palette};
 use crossterm::event::{
     self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
@@ -23,7 +23,7 @@ use crossterm::terminal::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
-use ratatui::widgets::{Block, Paragraph};
+use ratatui::widgets::Block;
 use ratatui::{Frame, Terminal};
 use std::io::{self, Stdout};
 use std::time::Duration;
@@ -37,10 +37,10 @@ struct State {
 }
 
 impl State {
-    fn new(ctx: &LaunchContext) -> Self {
+    fn new(ctx: &LaunchContext, nerd_font: bool) -> Self {
         Self {
             feature: Feature::Explorer,
-            views: Views::new(&ctx.cwd),
+            views: Views::new(&ctx.cwd, nerd_font),
             labeled_as: None,
             nav_hits: Vec::new(),
         }
@@ -52,20 +52,19 @@ pub fn run(ctx: LaunchContext) -> io::Result<()> {
     let _ = std::env::set_current_dir(&ctx.cwd);
 
     let palette = Palette::resolve();
-    let nerd_font = ui::detect_nerd_font();
+    let use_nf = ui::detect_nerd_font().should_use_icons();
     // TermGuard restores the terminal on Drop (normal return *and* panic).
     let mut term = TermGuard::enter()?;
-    event_loop(term.terminal(), &palette, &nerd_font, &ctx)
+    event_loop(term.terminal(), &palette, use_nf, &ctx)
 }
 
 fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     palette: &Palette,
-    nerd_font: &NerdFontSupport,
+    use_nf: bool,
     ctx: &LaunchContext,
 ) -> io::Result<()> {
-    let mut state = State::new(ctx);
-    let use_nf = nerd_font.should_use_icons();
+    let mut state = State::new(ctx, use_nf);
 
     // Initial Herdr border title = active feature.
     sync_pane_label(&mut state, ctx);
@@ -74,7 +73,7 @@ fn event_loop(
     loop {
         terminal.draw(|frame| {
             state.nav_hits.clear();
-            draw(frame, palette, nerd_font, use_nf, &mut state, ctx);
+            draw(frame, palette, use_nf, &mut state);
         })?;
 
         if !event::poll(Duration::from_millis(100))? {
@@ -163,14 +162,7 @@ fn handle_activity_click(state: &mut State, col: u16, row: u16) -> bool {
     false
 }
 
-fn draw(
-    frame: &mut Frame,
-    palette: &Palette,
-    nerd_font: &NerdFontSupport,
-    use_nf: bool,
-    state: &mut State,
-    ctx: &LaunchContext,
-) {
+fn draw(frame: &mut Frame, palette: &Palette, use_nf: bool, state: &mut State) {
     let area = frame.area();
 
     // No own outer border/title: herdr already frames the pane and labels it.
@@ -179,7 +171,7 @@ fn draw(
         area,
     );
 
-    let (activity, body, footer) = ui::layout::split_sidebar(area, true);
+    let (activity, body) = ui::layout::split_sidebar(area);
 
     let items: Vec<ActivityItem> = Feature::ALL
         .iter()
@@ -193,36 +185,6 @@ fn draw(
     state.nav_hits = bar.hits;
 
     state.views.get(state.feature).draw(frame, body, palette);
-    draw_footer(frame, footer, palette, nerd_font, state.feature, ctx);
-}
-
-fn draw_footer(
-    frame: &mut Frame,
-    area: Rect,
-    palette: &Palette,
-    nerd_font: &NerdFontSupport,
-    feature: Feature,
-    ctx: &LaunchContext,
-) {
-    if area.height == 0 {
-        return;
-    }
-    let nf = match nerd_font.available {
-        Some(true) => "nf",
-        Some(false) => "no-nf",
-        None => "nf?",
-    };
-    let text = format!(
-        " {}  {}  {}  {}  1/2/3  q ",
-        ctx.mode.label(),
-        palette.name,
-        feature.id(),
-        nf
-    );
-    frame.render_widget(
-        Paragraph::new(text).style(Style::default().fg(palette.subtext0).bg(palette.panel_bg)),
-        area,
-    );
 }
 
 /// Owns terminal raw mode / alt screen / mouse capture and always tears them

@@ -9,16 +9,14 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 /// Height of the top activity strip (icon row + breathing room).
 pub const ACTIVITY_HEIGHT: u16 = 3;
 
-/// Split the sidebar body into: activity strip | feature content | optional footer.
-pub fn split_sidebar(area: Rect, footer: bool) -> (Rect, Rect, Rect) {
-    let footer_h = if footer { 1 } else { 0 };
+/// Split the sidebar body into: activity strip | feature content.
+pub fn split_sidebar(area: Rect) -> (Rect, Rect) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(ACTIVITY_HEIGHT),
             Constraint::Min(1),
-            Constraint::Length(footer_h),
         ])
         .split(area);
-    (rows[0], rows[1], rows[2])
+    (rows[0], rows[1])
 }

@@ -4,11 +4,13 @@
 //! [`view::FeatureView`] for body draw / key / click handling. Activity-bar
 //! icons and digit shortcuts stay on the id enum.
 
+mod explorer;
 mod placeholder;
 mod view;
 
 pub use view::{FeatureView, KeyOutcome};
 
+use explorer::ExplorerView;
 use placeholder::PlaceholderView;
 
 /// A sidebar feature (activity-bar item).
@@ -41,9 +43,6 @@ impl Feature {
     }
 
     /// Activity-bar glyph. Prefer Nerd Font; plain ASCII when unavailable.
-    ///
-    /// Material icons match herdr-sidebar's FA set (often **two cells** wide in
-    /// non-Mono Nerd Fonts — callers should reserve a slack cell).
     pub fn icon(self, nerd_font: bool) -> &'static str {
         if nerd_font {
             match self {
@@ -90,18 +89,15 @@ impl Feature {
 
 /// All feature view instances owned by the shell.
 pub struct Views {
-    explorer: PlaceholderView,
+    explorer: ExplorerView,
     scm: PlaceholderView,
     github: PlaceholderView,
 }
 
 impl Views {
-    pub fn new(cwd: &std::path::Path) -> Self {
+    pub fn new(cwd: &std::path::Path, nerd_font: bool) -> Self {
         Self {
-            explorer: PlaceholderView::new(
-                Feature::Explorer,
-                format!("file tree goes here\n{}", cwd.display()),
-            ),
+            explorer: ExplorerView::new(cwd.to_path_buf(), nerd_font),
             scm: PlaceholderView::new(Feature::Scm, "git changes go here".into()),
             github: PlaceholderView::new(Feature::GitHub, "issues / PRs go here".into()),
         }
