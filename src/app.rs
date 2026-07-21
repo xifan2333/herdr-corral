@@ -191,90 +191,81 @@ fn draw_activity(
     use_nf: bool,
     palette: &Palette,
 ) {
-    // herdr-sidebar pattern:
-    //   activity strip is 3 rows tall
-    //   icons live on the MIDDLE row only
-    //   selected chip grows with half-block caps (▄ top / ▀ bottom)
-    // so the glyph sits visually centered in a tall button.
+    // Port of herdr-sidebar `draw_activity_bar`:
+    // - strip is 3 rows, plain pane background (no container)
+    // - icons ONLY on the middle row
+    // - active chip: middle-row bg + half-block caps on outer rows
+    //   so the glyph sits in the vertical center of a tall button
+    // - FA/Nerd glyphs are often 2 cells wide → reserve a slack cell
     if area.height < 3 || area.width == 0 {
         return;
     }
 
     let outer_top = area.y;
-    let mid_y = area.y + 1;
     let outer_bottom = area.y + 2;
-    let mid = Rect::new(area.x, mid_y, area.width, 1);
+    // Middle row only — same as `Rect::new(area.x, area.y + 1, area.width, 1)`.
+    let mid = Rect::new(area.x, area.y + 1, area.width, 1);
 
-    // Build one middle-row line of spans: " {icon}{slack} " chips with gaps.
-    // Material FA glyphs are often 2 cells wide — reserve a slack cell so chips
-    // stay equal and icons center (same as herdr-sidebar).
+    let chip_bg = palette.surface1;
+    // Span list mirrors herdr-sidebar: leading pad, then alternating chip + gap.
     let mut spans: Vec<Span> = Vec::new();
     spans.push(Span::raw(" "));
-    let mut chip_bounds: Vec<(Feature, u16, u16)> = Vec::new(); // feature, start_x, end_x relative to mid.x
-    let mut col: u16 = 1; // after leading space
-
     for feature in Feature::ALL {
         let icon = feature.icon(use_nf);
-        let slack = if feature.icon_double_width(use_nf) {
-            " "
-        } else {
-            ""
-        };
+        // FA/Nerd glyphs are often 2 cells wide — reserve a slack cell.
+        let slack = if use_nf { " " } else { "" };
         let selected = feature == state.feature;
-        let label = format!(" {icon}{slack} ");
         let style = if selected {
             Style::default()
                 .fg(palette.text)
-                .bg(palette.surface1)
+                .bg(chip_bg)
                 .add_modifier(Modifier::BOLD)
         } else {
-            // Idle: theme main text ("white"), no chip background.
             Style::default().fg(palette.text)
         };
-        let span = Span::styled(label, style);
-        let w = span.width() as u16;
-        let start = col;
-        let end = col.saturating_add(w);
-        chip_bounds.push((feature, start, end));
-        spans.push(span);
+        spans.push(Span::styled(format!(" {icon}{slack} "), style));
         spans.push(Span::raw(" "));
-        col = end.saturating_add(1);
     }
 
-    // Half-block caps only on the selected chip — tall button, icon on middle.
-    if let Some((_, start, end)) = chip_bounds
-        .iter()
-        .find(|(f, _, _)| *f == state.feature)
-    {
-        let chip_x = mid.x.saturating_add(*start);
+    // Absolute chip bounds from real span widths (same scan as herdr-sidebar).
+    // Layout: [pad, chip0, gap, chip1, gap, chip2, gap] → chips at indices 1,3,5.
+    let mut x = mid.x;
+    let mut bounds: Vec<(Feature, u16, u16)> = Vec::new();
+    for (i, span) in spans.iter().enumerate() {
+        let w = span.width() as u16;
+        if i % 2 == 1 {
+            // chip span
+            let fi = i / 2;
+            if let Some(feature) = Feature::from_index(fi) {
+                bounds.push((feature, x, x + w));
+            }
+        }
+        x = x.saturating_add(w);
+    }
+
+    // Symmetric half-block caps on the ACTIVE chip only (reference).
+    if let Some((_, start, end)) = bounds.iter().find(|(f, _, _)| *f == state.feature) {
         let chip_w = end.saturating_sub(*start);
         if chip_w > 0 {
-            let mut paint_cap = |glyph: &str, y: u16| {
-                frame.render_widget(
-                    Paragraph::new(glyph.repeat(usize::from(chip_w))).style(
-                        Style::default()
-                            .fg(palette.surface1)
-                            .bg(palette.panel_bg),
-                    ),
-                    Rect::new(chip_x, y, chip_w, 1),
-                );
-            };
-            paint_cap("▄", outer_top);
-            paint_cap("▀", outer_bottom);
+            // fg = chip color, default bg → half blocks read as extensions of the mid chip.
+            let cap = Paragraph::new("▄".repeat(usize::from(chip_w)))
+                .style(Style::default().fg(chip_bg));
+            frame.render_widget(cap, Rect::new(*start, outer_top, chip_w, 1));
+            let cap = Paragraph::new("▀".repeat(usize::from(chip_w)))
+                .style(Style::default().fg(chip_bg));
+            frame.render_widget(cap, Rect::new(*start, outer_bottom, chip_w, 1));
         }
     }
 
     frame.render_widget(Paragraph::new(Line::from(spans)), mid);
 
-    // Hit targets cover the full 3-row tall button for easier clicking.
-    for (feature, start, end) in chip_bounds {
-        let w = end.saturating_sub(start).max(1);
+    for (feature, start, end) in bounds {
         state.nav_hits.push((
             feature,
             Rect {
-                x: mid.x.saturating_add(start),
+                x: start,
                 y: outer_top,
-                width: w,
+                width: end.saturating_sub(start).max(1),
                 height: 3,
             },
         ));
