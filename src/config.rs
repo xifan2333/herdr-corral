@@ -1,23 +1,24 @@
-//! User config: one shell file (`config.sh`).
+//! User config: one shell file (`config.sh`), River-style.
 //!
-//! ```text
+//! ```sh
 //! # ~/.config/corral/config.sh  — or $HERDR_PLUGIN_CONFIG_DIR/config.sh
-//! bind enter open
-//! bind j down
+//! corral bind enter open
+//! corral bind j down
 //!
-//! open() {
-//!   ${EDITOR:-vi} "$CORRAL_FILE"
-//! }
-//!
-//! # optional: source ./git.sh
+//! open() { ${EDITOR:-vi} "$CORRAL_FILE"; }
+//! # optional: source "${CORRAL_CONFIG_DIR}/git.sh"
 //! ```
 //!
-//! - `bind <key> <action>` maps keys to action names
+//! Like River's `riverctl map …`: the config is a script that calls
+//! `corral bind <key> <action>`. Corral runs it once in *register mode* at
+//! startup to collect the binds; the same `corral bind` calls are no-ops when
+//! the file is later sourced to run an action function.
+//!
 //! - **internal** actions (`up`/`down`/`toggle`/…) stay in Rust
-//! - any other action name is a **shell function** of the same name in config.sh
-//! - if config is missing, an embedded default is used (still pure shell)
+//! - any other action name is a **shell function** of that name in config.sh
 
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -66,7 +67,9 @@ impl Config {
             .or_else(|| shipped_default().and_then(|d| std::fs::read_to_string(d).ok()))
             .unwrap_or_default();
 
-        let mut binds = parse_binds(&source);
+        // River-style: run the config once in register mode; `corral bind …`
+        // calls record key→action. Fall back to built-in nav binds on failure.
+        let mut binds = collect_binds(&source);
         if binds.is_empty() {
             binds = fallback_binds();
         }
@@ -81,7 +84,7 @@ impl Config {
 
     /// Action name bound to this key token, if any.
     pub fn action_for_key(&self, key_token: &str) -> Option<&str> {
-        self.binds.get(&key_token.to_ascii_lowercase()).map(String::as_str)
+        self.binds.get(&normalize_key(key_token)).map(String::as_str)
     }
 
     pub fn is_internal(action: &str) -> bool {
@@ -132,6 +135,8 @@ impl Config {
         cmd.env("CORRAL_CONFIG_DIR", &self.dir);
         cmd.env("CORRAL_CONFIG", &self.path);
         cmd.env("CORRAL_ACTION", action);
+        // Make `corral` resolvable so `corral bind …` (no-op here) never errors.
+        cmd.env("PATH", path_with_exe_dir());
         if let Some(f) = file {
             cmd.env("CORRAL_FILE", f);
             if let Some(parent) = f.parent() {
@@ -215,23 +220,97 @@ fn is_safe_fn_name(name: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-/// Parse `bind <key> <action>` lines. Other lines are left for bash to run.
-fn parse_binds(source: &str) -> HashMap<String, String> {
+/// Run the config in *register mode* and collect `corral bind` calls.
+///
+/// Like River: the script calls `corral bind <key> <action>`; in register mode
+/// that subcommand appends `key\taction` to `$CORRAL_BINDS_FILE`, which we read
+/// back. On any failure returns empty (caller uses [`fallback_binds`]).
+fn collect_binds(source: &str) -> HashMap<String, String> {
     let mut binds = HashMap::new();
-    for raw in source.lines() {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let Some(rest) = line.strip_prefix("bind ") else {
-            continue;
-        };
-        let mut parts = rest.split_whitespace();
-        let Some(key) = parts.next() else { continue };
-        let Some(action) = parts.next() else { continue };
-        binds.insert(key.to_ascii_lowercase(), action.to_string());
+    if source.trim().is_empty() {
+        return binds;
     }
+    let Ok(tmp) = tempfile_path("corral-binds") else {
+        return binds;
+    };
+
+    let status = Command::new("bash")
+        .arg("-c")
+        .arg(source)
+        .env("CORRAL_REGISTER", "1")
+        .env("CORRAL_BINDS_FILE", &tmp)
+        .env("PATH", path_with_exe_dir())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+
+    if status.map(|s| s.success()).unwrap_or(false) || tmp.exists() {
+        if let Ok(text) = std::fs::read_to_string(&tmp) {
+            for line in text.lines() {
+                let mut it = line.splitn(2, '\t');
+                if let (Some(k), Some(a)) = (it.next(), it.next()) {
+                    let k = k.trim();
+                    let a = a.trim();
+                    if !k.is_empty() && !a.is_empty() {
+                        binds.insert(normalize_key(k), a.to_string());
+                    }
+                }
+            }
+        }
+    }
+    let _ = std::fs::remove_file(&tmp);
     binds
+}
+
+/// Subcommand: `corral bind <key> <action>`.
+///
+/// Records the binding only in register mode (`CORRAL_REGISTER=1` +
+/// `CORRAL_BINDS_FILE`). Otherwise it is a harmless no-op, so the same call in
+/// a sourced action run does nothing.
+pub fn cli_bind(args: &[String]) -> std::io::Result<()> {
+    if std::env::var("CORRAL_REGISTER").ok().as_deref() != Some("1") {
+        return Ok(());
+    }
+    let (Some(key), Some(action)) = (args.first(), args.get(1)) else {
+        return Ok(());
+    };
+    if let Ok(path) = std::env::var("CORRAL_BINDS_FILE") {
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(f, "{}\t{}", normalize_key(key), action);
+        }
+    }
+    Ok(())
+}
+
+/// Normalize a key token: single characters keep case (so `g` ≠ `G`); named
+/// keys (`enter`, `left`, …) are case-insensitive.
+fn normalize_key(s: &str) -> String {
+    if s.chars().count() == 1 {
+        s.to_string()
+    } else {
+        s.to_ascii_lowercase()
+    }
+}
+
+/// PATH with the corral executable's directory prepended, so `corral` resolves.
+fn path_with_exe_dir() -> String {
+    let existing = std::env::var("PATH").unwrap_or_default();
+    match std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) {
+        Some(dir) => format!("{}:{existing}", dir.display()),
+        None => existing,
+    }
+}
+
+/// A unique temp file path under the system temp dir.
+fn tempfile_path(prefix: &str) -> std::io::Result<PathBuf> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let pid = std::process::id();
+    Ok(std::env::temp_dir().join(format!("{prefix}-{pid}-{nanos}")))
 }
 
 /// Minimal navigation binds when no config file is found at all (no `open`).

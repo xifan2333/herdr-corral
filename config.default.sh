@@ -5,26 +5,22 @@
 #   standalone: ${XDG_CONFIG_HOME:-~/.config}/corral/config.sh
 # Edit THAT file — no recompile needed. Delete it to re-seed from this default.
 #
-# bind <key> <action>   (internal: up down top bottom toggle collapse refresh open)
-# Any other action name = a shell function of that name below.
-# open() reuses one "Corral Editor" pane when possible (no new split every time).
+# River-style: call `corral bind <key> <action>` (like `riverctl map …`).
+#   internal actions: up down top bottom toggle collapse refresh open
+#   any other action = a shell function of that name (defined below)
 
-# `bind` lines are DATA for Corral's parser. Neutralize the bash `bind` builtin
-# so sourcing this file does not touch readline.
-bind() { :; }
-
-bind j down
-bind down down
-bind k up
-bind up up
-bind g top
-bind G bottom
-bind h collapse
-bind left collapse
-bind l toggle
-bind right toggle
-bind enter toggle
-bind r refresh
+corral bind j down
+corral bind down down
+corral bind k up
+corral bind up up
+corral bind g top
+corral bind G bottom
+corral bind h collapse
+corral bind left collapse
+corral bind l toggle
+corral bind right toggle
+corral bind enter toggle
+corral bind r refresh
 
 CORRAL_EDITOR_LABEL="Corral Editor"
 
