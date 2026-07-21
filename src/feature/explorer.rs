@@ -255,31 +255,38 @@ impl FeatureView for ExplorerView {
                 "  "
             };
 
-            let bg = if selected {
-                palette.surface1
-            } else {
-                palette.panel_bg
-            };
+            // No panel fill — only the selected row gets a chip bg.
             let fg = if entry.is_dir {
                 palette.blue
             } else {
                 palette.text
             };
-            let style = Style::default().fg(fg).bg(bg).add_modifier(if selected {
-                Modifier::BOLD
+            let style = if selected {
+                Style::default()
+                    .fg(fg)
+                    .bg(palette.surface1)
+                    .add_modifier(Modifier::BOLD)
             } else {
-                Modifier::empty()
-            });
-            let dim = Style::default().fg(palette.overlay1).bg(bg);
+                Style::default().fg(fg)
+            };
+            let dim = if selected {
+                Style::default().fg(palette.overlay1).bg(palette.surface1)
+            } else {
+                Style::default().fg(palette.overlay1)
+            };
 
             let line = Line::from(vec![
                 Span::styled(format!("{indent}{chevron}"), dim),
                 Span::styled(format!("{glyph} "), style),
                 Span::styled(entry.name.as_str(), style),
             ]);
-            // Pad rest of row with bg so selection is a full bar.
+            let row_style = if selected {
+                Style::default().bg(palette.surface1)
+            } else {
+                Style::default()
+            };
             frame.render_widget(
-                Paragraph::new(line).style(Style::default().bg(bg)),
+                Paragraph::new(line).style(row_style),
                 Rect {
                     x: area.x,
                     y,

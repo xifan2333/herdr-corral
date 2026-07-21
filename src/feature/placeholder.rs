@@ -31,7 +31,6 @@ impl FeatureView for PlaceholderView {
             Paragraph::new(title).style(
                 Style::default()
                     .fg(palette.subtext0)
-                    .bg(palette.panel_bg)
                     .add_modifier(ratatui::style::Modifier::BOLD),
             ),
             Rect {

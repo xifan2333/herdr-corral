@@ -22,8 +22,6 @@ use crossterm::terminal::{
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
-use ratatui::widgets::Block;
 use ratatui::{Frame, Terminal};
 use std::io::{self, Stdout};
 use std::time::Duration;
@@ -165,12 +163,7 @@ fn handle_activity_click(state: &mut State, col: u16, row: u16) -> bool {
 fn draw(frame: &mut Frame, palette: &Palette, use_nf: bool, state: &mut State) {
     let area = frame.area();
 
-    // No own outer border/title: herdr already frames the pane and labels it.
-    frame.render_widget(
-        Block::default().style(Style::default().bg(palette.panel_bg).fg(palette.text)),
-        area,
-    );
-
+    // Transparent pane: no fill — host terminal bg shows through.
     let (activity, body) = ui::layout::split_sidebar(area);
 
     let items: Vec<ActivityItem> = Feature::ALL
