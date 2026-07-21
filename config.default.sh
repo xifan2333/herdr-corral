@@ -9,6 +9,10 @@
 # Any other action name = a shell function of that name below.
 # open() reuses one "Corral Editor" pane when possible (no new split every time).
 
+# `bind` lines are DATA for Corral's parser. Neutralize the bash `bind` builtin
+# so sourcing this file does not touch readline.
+bind() { :; }
+
 bind j down
 bind down down
 bind k up
