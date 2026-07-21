@@ -49,8 +49,28 @@ impl Config {
     pub fn load() -> Self {
         let dir = config_dir();
         let path = dir.join("config.sh");
-        let source = std::fs::read_to_string(&path).unwrap_or_else(|_| DEFAULT_CONFIG.to_string());
-        let binds = parse_binds(&source);
+
+        // Seed the user config from the shipped default on first run, so it can
+        // be edited on disk without recompiling Corral.
+        if !path.exists() {
+            if let Some(def) = shipped_default() {
+                let _ = std::fs::create_dir_all(&dir);
+                let _ = std::fs::copy(&def, &path);
+            }
+        }
+
+        // Load user config; fall back to the shipped default file if the user
+        // copy is still missing (e.g. seeding failed / read-only dir).
+        let source = std::fs::read_to_string(&path)
+            .ok()
+            .or_else(|| shipped_default().and_then(|d| std::fs::read_to_string(d).ok()))
+            .unwrap_or_default();
+
+        let mut binds = parse_binds(&source);
+        if binds.is_empty() {
+            binds = fallback_binds();
+        }
+
         Self {
             dir,
             path,
@@ -211,11 +231,67 @@ fn parse_binds(source: &str) -> HashMap<String, String> {
         let Some(action) = parts.next() else { continue };
         binds.insert(key.to_ascii_lowercase(), action.to_string());
     }
-    // If config had no binds at all, use defaults from embedded config.
-    if binds.is_empty() {
-        binds = parse_binds(DEFAULT_CONFIG);
-    }
     binds
+}
+
+/// Minimal navigation binds when no config file is found at all (no `open`).
+fn fallback_binds() -> HashMap<String, String> {
+    let pairs = [
+        ("j", internal::DOWN),
+        ("down", internal::DOWN),
+        ("k", internal::UP),
+        ("up", internal::UP),
+        ("g", internal::TOP),
+        ("G", internal::BOTTOM),
+        ("h", internal::COLLAPSE),
+        ("left", internal::COLLAPSE),
+        ("l", internal::TOGGLE),
+        ("right", internal::TOGGLE),
+        ("enter", internal::TOGGLE),
+        ("r", internal::REFRESH),
+    ];
+    pairs
+        .iter()
+        .map(|(k, a)| (k.to_string(), (*a).to_string()))
+        .collect()
+}
+
+/// Locate the shipped `config.default.sh` (never embedded in the binary).
+fn shipped_default() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("CORRAL_DEFAULT_CONFIG") {
+        let p = PathBuf::from(p);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    if let Ok(root) = std::env::var("HERDR_PLUGIN_ROOT") {
+        if !root.is_empty() {
+            let p = PathBuf::from(root).join("config.default.sh");
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        // e.g. target/release/corral -> repo/config.default.sh (dev),
+        // or <prefix>/bin/corral -> <prefix>/share/corral/config.default.sh.
+        let candidates = [
+            exe.parent().map(|d| d.join("config.default.sh")),
+            exe.parent()
+                .and_then(|d| d.parent())
+                .map(|d| d.join("config.default.sh")),
+            exe.parent()
+                .and_then(|d| d.parent())
+                .and_then(|d| d.parent())
+                .map(|d| d.join("config.default.sh")),
+        ];
+        for cand in candidates.into_iter().flatten() {
+            if cand.is_file() {
+                return Some(cand);
+            }
+        }
+    }
+    None
 }
 
 /// Map a crossterm key to a lowercase token used in `bind` lines.
@@ -238,130 +314,3 @@ pub fn key_token(code: crossterm::event::KeyCode) -> Option<String> {
         _ => return None,
     })
 }
-
-/// Default config when the user has not created one yet.
-pub const DEFAULT_CONFIG: &str = r#"# Corral config (shell). Not executed at startup — sourced when an action runs.
-# bind <key> <action>
-#   internal: up down top bottom toggle collapse refresh open
-#   shell:    any other name = function of that name below
-# Split modules yourself:  source "${CORRAL_CONFIG_DIR}/git.sh"
-#
-# Env when an action runs:
-#   CORRAL_FILE CORRAL_DIR CORRAL_CONFIG_DIR CORRAL_ACTION
-#   HERDR_BIN_PATH HERDR_ENV HERDR_PANE_ID (when hosted)
-#
-# Return convention for shell actions:
-#   echo CORRAL_SUSPEND=0  — keep the TUI up (default for Herdr pane ops)
-#   echo CORRAL_SUSPEND=1  — TUI leaves alt-screen (standalone $EDITOR)
-
-bind j down
-bind down down
-bind k up
-bind up up
-bind g top
-bind G bottom
-bind h collapse
-bind left collapse
-bind l toggle
-bind right toggle
-bind enter toggle
-bind r refresh
-
-# Open selected file in $EDITOR — reuse one editor pane when possible.
-# Herdr / WezTerm: dock right once, then swap files in that same pane.
-# Standalone TTY fallback: suspend and run $EDITOR here.
-
-CORRAL_EDITOR_LABEL="Corral Editor"
-
-open() {
-  local file="${1:-${CORRAL_FILE:-}}"
-  [[ -n "$file" && -e "$file" ]] || return 1
-  local editor="${EDITOR:-${VISUAL:-vi}}"
-  # qfile: shell-quoted (for a shell command line).
-  # vfile: vim command-line escaped (only spaces) — :edit is NOT a shell.
-  local qfile vfile
-  qfile=$(printf '%q' "$file")
-  vfile=${file// /\\ }
-
-  # --- Herdr: one labeled editor pane, reuse on later opens ---
-  if [[ -n "${HERDR_BIN_PATH:-}" && -n "${HERDR_ENV:-}" ]]; then
-    echo CORRAL_SUSPEND=0
-    local herdr="$HERDR_BIN_PATH" pid="" out
-    # Find existing "Corral Editor" pane (any workspace tab).
-    pid="$("$herdr" pane list 2>/dev/null \
-      | jq -r --arg l "$CORRAL_EDITOR_LABEL" \
-          'first(.result.panes[] | select(.label == $l) | .pane_id) // empty' 2>/dev/null || true)"
-
-    if [[ -z "$pid" ]]; then
-      out="$("$herdr" pane split --current --direction right --focus --ratio 0.75 2>&1)" || return 1
-      pid="$(printf '%s' "$out" | jq -r '.result.pane.pane_id // empty' 2>/dev/null || true)"
-      [[ -n "$pid" ]] || return 1
-      "$herdr" pane rename "$pid" "$CORRAL_EDITOR_LABEL" >/dev/null 2>&1 || true
-      "$herdr" pane send-text "$pid" "$editor $qfile" >/dev/null
-      "$herdr" pane send-keys "$pid" enter >/dev/null
-    else
-      # Reuse: focus, then :edit for vi-family, else restart editor command.
-      "$herdr" pane zoom "$pid" --on >/dev/null 2>&1 || true
-      "$herdr" pane zoom "$pid" --off >/dev/null 2>&1 || true
-      case "$editor" in
-        *nvim*|*vim*|*vi)
-          "$herdr" pane send-keys "$pid" esc >/dev/null
-          "$herdr" pane send-text "$pid" ":edit $vfile" >/dev/null
-          "$herdr" pane send-keys "$pid" enter >/dev/null
-          ;;
-        *)
-          # Interrupt whatever is running, then launch editor on the file.
-          "$herdr" pane send-keys "$pid" ctrl+c >/dev/null
-          "$herdr" pane send-text "$pid" "$editor $qfile" >/dev/null
-          "$herdr" pane send-keys "$pid" enter >/dev/null
-          ;;
-      esac
-    fi
-    return 0
-  fi
-
-  # --- WezTerm: reuse pane id stored under config dir ---
-  if [[ -n "${WEZTERM_PANE:-}" ]] && command -v wezterm >/dev/null 2>&1; then
-    echo CORRAL_SUSPEND=0
-    local state="${CORRAL_CONFIG_DIR:-/tmp}/wezterm-editor.pane"
-    local pid=""
-    if [[ -f "$state" ]]; then
-      pid="$(cat "$state" 2>/dev/null || true)"
-      # Drop stale ids that are no longer in the mux.
-      if [[ -n "$pid" ]] && ! wezterm cli list 2>/dev/null | grep -q "^$pid\b\|pane_id=$pid\|$pid "; then
-        # list format is a table; match pane id column loosely
-        if ! wezterm cli list 2>/dev/null | awk '{print $1}' | grep -qx "$pid"; then
-          pid=""
-        fi
-      fi
-    fi
-    if [[ -z "$pid" ]]; then
-      # shellcheck disable=SC2086
-      pid="$(wezterm cli split-pane --right --percent 75 -- $editor "$file" 2>/dev/null | tr -d '[:space:]')" || return 1
-      [[ -n "$pid" ]] || return 1
-      mkdir -p "${CORRAL_CONFIG_DIR:-/tmp}"
-      printf '%s' "$pid" >"$state"
-    else
-      wezterm cli activate-pane --pane-id "$pid" >/dev/null 2>&1 || true
-      case "$editor" in
-        *nvim*|*vim*|*vi)
-          # Esc to normal mode, then :edit <path><CR>. Raw path (vim-escaped),
-          # never the shell %q form.
-          wezterm cli send-text --pane-id "$pid" --no-paste $'\x1b:edit '"$vfile"$'\r' >/dev/null
-          ;;
-        *)
-          wezterm cli send-text --pane-id "$pid" --no-paste $'\x03' 2>/dev/null || true
-          # shellcheck disable=SC2086
-          wezterm cli send-text --pane-id "$pid" --no-paste "$editor $qfile"$'\r' >/dev/null
-          ;;
-      esac
-    fi
-    return 0
-  fi
-
-  # --- Fallback: editor in this TTY ---
-  echo CORRAL_SUSPEND=1
-  # shellcheck disable=SC2086
-  exec $editor "$file"
-}
-"#;

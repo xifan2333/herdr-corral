@@ -1,7 +1,12 @@
-# Corral config — copy to:
-#   plugin:     $(herdr plugin config-dir corral)/config.sh
-#   standalone: ~/.config/corral/config.sh
+# Corral default config (shell). Shipped with the plugin as config.default.sh.
 #
+# On first run Corral copies this to your editable config:
+#   plugin:     $(herdr plugin config-dir corral)/config.sh
+#   standalone: ${XDG_CONFIG_HOME:-~/.config}/corral/config.sh
+# Edit THAT file — no recompile needed. Delete it to re-seed from this default.
+#
+# bind <key> <action>   (internal: up down top bottom toggle collapse refresh open)
+# Any other action name = a shell function of that name below.
 # open() reuses one "Corral Editor" pane when possible (no new split every time).
 
 bind j down
