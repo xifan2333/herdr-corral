@@ -13,17 +13,91 @@ pub use model::{
 };
 
 /// Read-only GitHub operations used by the first GitHub feature slice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MergeMethod {
+    Merge,
+    Squash,
+    Rebase,
+}
+
+impl MergeMethod {
+    pub const ALL: [MergeMethod; 3] =
+        [MergeMethod::Merge, MergeMethod::Squash, MergeMethod::Rebase];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            MergeMethod::Merge => "merge",
+            MergeMethod::Squash => "squash",
+            MergeMethod::Rebase => "rebase",
+        }
+    }
+
+    pub fn title(self) -> &'static str {
+        match self {
+            MergeMethod::Merge => "Merge",
+            MergeMethod::Squash => "Squash",
+            MergeMethod::Rebase => "Rebase",
+        }
+    }
+
+    pub fn flag(self) -> &'static str {
+        match self {
+            MergeMethod::Merge => "--merge",
+            MergeMethod::Squash => "--squash",
+            MergeMethod::Rebase => "--rebase",
+        }
+    }
+
+    pub fn index(self) -> usize {
+        match self {
+            MergeMethod::Merge => 0,
+            MergeMethod::Squash => 1,
+            MergeMethod::Rebase => 2,
+        }
+    }
+
+    pub fn from_index(index: usize) -> Option<Self> {
+        Self::ALL.get(index).copied()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GitHubMutation {
-    IssueComment { number: u64, body: String },
-    IssueState { number: u64, open: bool },
-    PullComment { number: u64, body: String },
-    PullApprove { number: u64 },
-    PullRequestChanges { number: u64, body: String },
-    PullMergeSquash { number: u64, head_sha: String },
-    PullState { number: u64, open: bool },
-    RunCancel { run_id: u64 },
-    RunRerun { run_id: u64, failed_only: bool },
+    IssueComment {
+        number: u64,
+        body: String,
+    },
+    IssueState {
+        number: u64,
+        open: bool,
+    },
+    PullComment {
+        number: u64,
+        body: String,
+    },
+    PullApprove {
+        number: u64,
+    },
+    PullRequestChanges {
+        number: u64,
+        body: String,
+    },
+    PullMerge {
+        number: u64,
+        head_sha: String,
+        method: MergeMethod,
+    },
+    PullState {
+        number: u64,
+        open: bool,
+    },
+    RunCancel {
+        run_id: u64,
+    },
+    RunRerun {
+        run_id: u64,
+        failed_only: bool,
+    },
 }
 
 pub trait GitHubDetailAdapter: Send + Sync {

@@ -277,14 +277,18 @@ impl GitHubDetailAdapter for GhCli {
                 ],
                 Some(body),
             ),
-            GitHubMutation::PullMergeSquash { number, head_sha } => (
+            GitHubMutation::PullMerge {
+                number,
+                head_sha,
+                method,
+            } => (
                 vec![
                     "pr".into(),
                     "merge".into(),
                     number.to_string(),
                     "--repo".into(),
                     repo.into(),
-                    "--squash".into(),
+                    method.flag().into(),
                     "--match-head-commit".into(),
                     head_sha.clone(),
                 ],

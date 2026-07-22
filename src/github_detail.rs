@@ -5,8 +5,8 @@
 
 use crate::config::{self, Config};
 use crate::github::{
-    Comment, GhCli, GitHubDetailAdapter, GitHubMutation, IssueDetail, PullRequestDetail, Review,
-    WorkflowRunDetail,
+    Comment, GhCli, GitHubDetailAdapter, GitHubMutation, IssueDetail, MergeMethod,
+    PullRequestDetail, Review, WorkflowRunDetail,
 };
 use crate::ui::Palette;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
@@ -108,6 +108,11 @@ enum Mode {
     Compose {
         kind: ComposeKind,
         text: Vec<char>,
+    },
+    MergeMethod {
+        number: u64,
+        head_sha: String,
+        selected: usize,
     },
     Confirm {
         message: String,
@@ -456,14 +461,39 @@ impl DetailApp {
             self.set_notice("pull request is not mergeable", true);
             return;
         }
+        // Default to squash, which matches the previous behavior and is usually
+        // the least noisy history-preserving option for feature branches.
+        self.mode = Mode::MergeMethod {
+            number,
+            head_sha: pull.head_ref_oid.clone(),
+            selected: MergeMethod::Squash.index(),
+        };
+    }
+
+    fn confirm_selected_merge(&mut self) {
+        let Mode::MergeMethod {
+            number,
+            head_sha,
+            selected,
+        } = &self.mode
+        else {
+            return;
+        };
+        let Some(method) = MergeMethod::from_index(*selected) else {
+            return;
+        };
+        let number = *number;
+        let head_sha = head_sha.clone();
         self.confirm(
             format!(
-                "Squash merge #{number} at {}?",
-                short_sha(&pull.head_ref_oid)
+                "{} merge #{number} at {}?",
+                method.title(),
+                short_sha(&head_sha)
             ),
-            GitHubMutation::PullMergeSquash {
+            GitHubMutation::PullMerge {
                 number,
-                head_sha: pull.head_ref_oid.clone(),
+                head_sha,
+                method,
             },
         );
     }
@@ -660,6 +690,47 @@ impl DetailApp {
                                 }
                             }
                         }
+                    }
+                }
+            }
+            return false;
+        }
+        if matches!(self.mode, Mode::MergeMethod { .. }) {
+            match action.as_deref() {
+                Some(config::internal::UP) => {
+                    if let Mode::MergeMethod { selected, .. } = &mut self.mode {
+                        *selected = selected.saturating_sub(1);
+                    }
+                }
+                Some(config::internal::DOWN) => {
+                    if let Mode::MergeMethod { selected, .. } = &mut self.mode {
+                        *selected = (*selected + 1).min(MergeMethod::ALL.len() - 1);
+                    }
+                }
+                Some(config::internal::TOP) => {
+                    if let Mode::MergeMethod { selected, .. } = &mut self.mode {
+                        *selected = 0;
+                    }
+                }
+                Some(config::internal::BOTTOM) => {
+                    if let Mode::MergeMethod { selected, .. } = &mut self.mode {
+                        *selected = MergeMethod::ALL.len() - 1;
+                    }
+                }
+                Some(
+                    config::internal::TOGGLE
+                    | config::internal::OPEN
+                    | config::internal::GITHUB_VIEW
+                    | config::internal::GITHUB_MERGE
+                    | config::internal::GITHUB_CONFIRM,
+                ) => self.confirm_selected_merge(),
+                Some(config::internal::GITHUB_CANCEL) => self.mode = Mode::Browse,
+                _ => {
+                    if let KeyCode::Char(ch @ '1'..='3') = code {
+                        if let Mode::MergeMethod { selected, .. } = &mut self.mode {
+                            *selected = (ch as u8 - b'1') as usize;
+                        }
+                        self.confirm_selected_merge();
                     }
                 }
             }
@@ -936,6 +1007,52 @@ impl DetailApp {
 
         match &self.mode {
             Mode::Browse => {}
+            Mode::MergeMethod {
+                number,
+                head_sha,
+                selected,
+            } => {
+                let width = area.width.saturating_sub(2).clamp(1, 56);
+                let height = 8.min(area.height.max(1));
+                let rect = Rect {
+                    x: area.x + area.width.saturating_sub(width) / 2,
+                    y: area.y + area.height.saturating_sub(height) / 2,
+                    width,
+                    height,
+                };
+                let block = Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!(" Merge #{number} @ {} ", short_sha(head_sha)))
+                    .style(Style::default().fg(palette.accent).bg(palette.panel_bg));
+                let inner = block.inner(rect);
+                frame.render_widget(Clear, rect);
+                frame.render_widget(block, rect);
+                let mut lines = Vec::new();
+                for (index, method) in MergeMethod::ALL.into_iter().enumerate() {
+                    let marker = if index == *selected { "› " } else { "  " };
+                    let style = if index == *selected {
+                        Style::default()
+                            .fg(palette.accent)
+                            .add_modifier(Modifier::BOLD)
+                            .bg(palette.surface0)
+                    } else {
+                        Style::default().fg(palette.text)
+                    };
+                    lines.push(Line::styled(
+                        format!("{marker}{}  {}", index + 1, method.label()),
+                        style,
+                    ));
+                }
+                lines.push(Line::raw(String::new()));
+                lines.push(Line::styled(
+                    "j/k select  Enter confirm  Esc cancel",
+                    Style::default().fg(palette.overlay1),
+                ));
+                frame.render_widget(
+                    Paragraph::new(lines).style(Style::default().bg(palette.panel_bg)),
+                    inner,
+                );
+            }
             Mode::Compose { kind, text } => {
                 let height = area.height.saturating_sub(1).clamp(1, 10);
                 let rect = Rect {
@@ -1684,8 +1801,46 @@ mod tests {
         pull_app.merge_pull();
         assert!(matches!(
             pull_app.mode,
+            Mode::MergeMethod {
+                number: 8,
+                selected: 1,
+                ..
+            }
+        ));
+        pull_app.confirm_selected_merge();
+        assert!(matches!(
+            pull_app.mode,
             Mode::Confirm {
-                mutation: GitHubMutation::PullMergeSquash { number: 8, .. },
+                mutation: GitHubMutation::PullMerge {
+                    number: 8,
+                    method: MergeMethod::Squash,
+                    ..
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn merge_method_picker_cycles_and_confirms_selected_strategy() {
+        let mut pull_app = app(DetailResource::Pull(9));
+        pull_app.detail = Some(Detail::Pull(
+            serde_json::from_str(
+                r#"{"number":9,"title":"feature","state":"OPEN","isDraft":false,"headRefOid":"abcdef123456","statusCheckRollup":[]}"#,
+            )
+            .unwrap(),
+        ));
+        pull_app.merge_pull();
+        pull_app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE, 10);
+        pull_app.confirm_selected_merge();
+        assert!(matches!(
+            pull_app.mode,
+            Mode::Confirm {
+                mutation: GitHubMutation::PullMerge {
+                    number: 9,
+                    method: MergeMethod::Rebase,
+                    ..
+                },
                 ..
             }
         ));
