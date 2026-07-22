@@ -13,6 +13,10 @@ path = "src/lib.rs"
 name = "corral"
 path = "src/main.rs"
 
+[[bin]]
+name = "corral-diff"
+path = "src/bin/corral-diff.rs"
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

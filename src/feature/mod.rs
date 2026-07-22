@@ -6,6 +6,7 @@
 
 mod explorer;
 mod placeholder;
+mod scm;
 mod view;
 
 pub use view::{FeatureView, KeyOutcome};
@@ -13,6 +14,7 @@ pub use view::{FeatureView, KeyOutcome};
 use crate::config::Config;
 use explorer::ExplorerView;
 use placeholder::PlaceholderView;
+use scm::ScmView;
 use std::sync::Arc;
 
 /// A sidebar feature (activity-bar item).
@@ -88,15 +90,15 @@ impl Feature {
 /// All feature view instances owned by the shell.
 pub struct Views {
     explorer: ExplorerView,
-    scm: PlaceholderView,
+    scm: ScmView,
     github: PlaceholderView,
 }
 
 impl Views {
     pub fn new(cwd: &std::path::Path, nerd_font: bool, config: Arc<Config>) -> Self {
         Self {
-            explorer: ExplorerView::new(cwd.to_path_buf(), nerd_font, config),
-            scm: PlaceholderView::new(Feature::Scm, "git changes go here".into()),
+            explorer: ExplorerView::new(cwd.to_path_buf(), nerd_font, Arc::clone(&config)),
+            scm: ScmView::new(cwd.to_path_buf(), nerd_font, config),
             github: PlaceholderView::new(Feature::GitHub, "issues / PRs go here".into()),
         }
     }

@@ -24,12 +24,35 @@ use std::process::{Command, Stdio};
 
 /// Internal actions handled by the TUI (not shell).
 pub mod internal {
+    pub const QUIT: &str = "quit";
+    pub const FEATURE_EXPLORER: &str = "feature-explorer";
+    pub const FEATURE_SCM: &str = "feature-scm";
+    pub const FEATURE_GITHUB: &str = "feature-github";
+    pub const SCM_TOGGLE_STAGE: &str = "scm-toggle-stage";
+    pub const SCM_STAGE_ALL: &str = "scm-stage-all";
+    pub const SCM_UNSTAGE_ALL: &str = "scm-unstage-all";
+    pub const SCM_OPEN_DIFF: &str = "scm-open-diff";
+    pub const SCM_FOCUS_MESSAGE: &str = "scm-focus-message";
+    pub const SCM_COMMIT: &str = "scm-commit";
+    pub const SCM_DISCARD: &str = "scm-discard";
+    pub const SCM_CONFIRM: &str = "scm-confirm";
+    pub const SCM_CANCEL: &str = "scm-cancel";
+    pub const SCM_SYNC: &str = "scm-sync";
+    pub const EDIT_BACKSPACE: &str = "edit-backspace";
+    pub const EDIT_DELETE: &str = "edit-delete";
+    pub const EDIT_HOME: &str = "edit-home";
+    pub const EDIT_END: &str = "edit-end";
     pub const UP: &str = "up";
     pub const DOWN: &str = "down";
     pub const TOP: &str = "top";
     pub const BOTTOM: &str = "bottom";
+    pub const PAGE_UP: &str = "page-up";
+    pub const PAGE_DOWN: &str = "page-down";
     pub const TOGGLE: &str = "toggle";
+    pub const EXPAND: &str = "expand";
     pub const COLLAPSE: &str = "collapse";
+    pub const COLLAPSE_ALL: &str = "collapse-all";
+    pub const TOGGLE_HIDDEN: &str = "toggle-hidden";
     pub const REFRESH: &str = "refresh";
     pub const OPEN: &str = "open";
 }
@@ -82,20 +105,55 @@ impl Config {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        Self {
+            dir: PathBuf::new(),
+            path: PathBuf::new(),
+            source: String::new(),
+            binds: fallback_binds(),
+        }
+    }
+
     /// Action name bound to this key token, if any.
     pub fn action_for_key(&self, key_token: &str) -> Option<&str> {
-        self.binds.get(&normalize_key(key_token)).map(String::as_str)
+        self.binds
+            .get(&normalize_key(key_token))
+            .map(String::as_str)
     }
 
     pub fn is_internal(action: &str) -> bool {
         matches!(
             action,
-            internal::UP
+            internal::QUIT
+                | internal::FEATURE_EXPLORER
+                | internal::FEATURE_SCM
+                | internal::FEATURE_GITHUB
+                | internal::SCM_TOGGLE_STAGE
+                | internal::SCM_STAGE_ALL
+                | internal::SCM_UNSTAGE_ALL
+                | internal::SCM_OPEN_DIFF
+                | internal::SCM_FOCUS_MESSAGE
+                | internal::SCM_COMMIT
+                | internal::SCM_DISCARD
+                | internal::SCM_CONFIRM
+                | internal::SCM_CANCEL
+                | internal::SCM_SYNC
+                | internal::EDIT_BACKSPACE
+                | internal::EDIT_DELETE
+                | internal::EDIT_HOME
+                | internal::EDIT_END
+                | internal::UP
                 | internal::DOWN
                 | internal::TOP
                 | internal::BOTTOM
+                | internal::PAGE_UP
+                | internal::PAGE_DOWN
                 | internal::TOGGLE
+                | internal::EXPAND
                 | internal::COLLAPSE
+                | internal::COLLAPSE_ALL
+                | internal::TOGGLE_HIDDEN
                 | internal::REFRESH
         )
     }
@@ -111,7 +169,7 @@ impl Config {
         &self,
         action: &str,
         file: Option<&Path>,
-        extra_env: &[(&str, String)],
+        extra_env: &[(String, String)],
         inherit_tty: bool,
     ) -> ShellResult {
         if !is_safe_fn_name(action) {
@@ -122,8 +180,13 @@ impl Config {
         }
 
         let mut cmd = Command::new("bash");
+        // Guard with `declare -F`: an action whose function is missing from
+        // config.sh (e.g. a stale user copy) must fail cleanly, never fall
+        // through to a same-named external command like `diff`.
         cmd.arg("-c").arg(format!(
-            "set -euo pipefail\n{source}\n{action} \"$@\"\n",
+            "set -euo pipefail\n{source}\n\
+             if declare -F {action} >/dev/null 2>&1; then {action} \"$@\"; \
+             else printf 'corral: no shell action: %s\\n' {action} >&2; exit 127; fi\n",
             source = self.source,
             action = action,
         ));
@@ -156,10 +219,7 @@ impl Config {
                 .status()
                 .map(|s| s.success())
                 .unwrap_or(false);
-            return ShellResult {
-                ok,
-                suspend: true,
-            };
+            return ShellResult { ok, suspend: true };
         }
 
         // Hosted: capture stdout for CORRAL_SUSPEND=*; keep TUI up by default.
@@ -276,7 +336,11 @@ pub fn cli_bind(args: &[String]) -> std::io::Result<()> {
         return Ok(());
     };
     if let Ok(path) = std::env::var("CORRAL_BINDS_FILE") {
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
             let _ = writeln!(f, "{}\t{}", normalize_key(key), action);
         }
     }
@@ -296,7 +360,10 @@ fn normalize_key(s: &str) -> String {
 /// PATH with the corral executable's directory prepended, so `corral` resolves.
 fn path_with_exe_dir() -> String {
     let existing = std::env::var("PATH").unwrap_or_default();
-    match std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) {
+    match std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(Path::to_path_buf))
+    {
         Some(dir) => format!("{}:{existing}", dir.display()),
         None => existing,
     }
@@ -316,17 +383,41 @@ fn tempfile_path(prefix: &str) -> std::io::Result<PathBuf> {
 /// Minimal navigation binds when no config file is found at all (no `open`).
 fn fallback_binds() -> HashMap<String, String> {
     let pairs = [
+        ("q", internal::QUIT),
+        ("ctrl+c", internal::QUIT),
+        ("1", internal::FEATURE_EXPLORER),
+        ("2", internal::FEATURE_SCM),
+        ("3", internal::FEATURE_GITHUB),
+        ("s", internal::SCM_TOGGLE_STAGE),
+        ("space", internal::SCM_TOGGLE_STAGE),
+        ("a", internal::SCM_STAGE_ALL),
+        ("u", internal::SCM_UNSTAGE_ALL),
+        ("o", internal::SCM_OPEN_DIFF),
+        ("c", internal::SCM_FOCUS_MESSAGE),
+        ("D", internal::SCM_DISCARD),
+        ("y", internal::SCM_CONFIRM),
+        ("n", internal::SCM_CANCEL),
+        ("esc", internal::SCM_CANCEL),
+        ("S", internal::SCM_SYNC),
+        ("backspace", internal::EDIT_BACKSPACE),
+        ("delete", internal::EDIT_DELETE),
+        ("home", internal::EDIT_HOME),
+        ("end", internal::EDIT_END),
         ("j", internal::DOWN),
         ("down", internal::DOWN),
         ("k", internal::UP),
         ("up", internal::UP),
         ("g", internal::TOP),
         ("G", internal::BOTTOM),
+        ("pageup", internal::PAGE_UP),
+        ("pagedown", internal::PAGE_DOWN),
         ("h", internal::COLLAPSE),
         ("left", internal::COLLAPSE),
-        ("l", internal::TOGGLE),
-        ("right", internal::TOGGLE),
+        ("l", internal::EXPAND),
+        ("right", internal::EXPAND),
         ("enter", internal::TOGGLE),
+        (".", internal::TOGGLE_HIDDEN),
+        ("z", internal::COLLAPSE_ALL),
         ("r", internal::REFRESH),
     ];
     pairs
@@ -373,12 +464,21 @@ fn shipped_default() -> Option<PathBuf> {
     None
 }
 
-/// Map a crossterm key to a lowercase token used in `bind` lines.
-pub fn key_token(code: crossterm::event::KeyCode) -> Option<String> {
+/// Map a crossterm key chord to the token used in `bind` lines.
+/// Character case is preserved (`g` ≠ `G`); named keys are lowercase.
+pub fn key_token(
+    code: crossterm::event::KeyCode,
+    mods: crossterm::event::KeyModifiers,
+) -> Option<String> {
     use crossterm::event::KeyCode::*;
-    Some(match code {
+    use crossterm::event::KeyModifiers;
+
+    let base = match code {
+        Char(' ') => "space".into(),
         Char(c) => c.to_string(),
         Enter => "enter".into(),
+        Backspace => "backspace".into(),
+        Delete => "delete".into(),
         Left => "left".into(),
         Right => "right".into(),
         Up => "up".into(),
@@ -391,5 +491,52 @@ pub fn key_token(code: crossterm::event::KeyCode) -> Option<String> {
         Tab => "tab".into(),
         BackTab => "backtab".into(),
         _ => return None,
-    })
+    };
+    let mut prefixes = Vec::new();
+    if mods.contains(KeyModifiers::CONTROL) {
+        prefixes.push("ctrl");
+    }
+    if mods.contains(KeyModifiers::ALT) {
+        prefixes.push("alt");
+    }
+    // Terminals normally encode shifted characters in the character itself;
+    // retain Shift only for named keys such as shift+tab.
+    if mods.contains(KeyModifiers::SHIFT) && !matches!(code, Char(_)) {
+        prefixes.push("shift");
+    }
+    if prefixes.is_empty() {
+        Some(base)
+    } else {
+        Some(format!("{}+{base}", prefixes.join("+")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    #[test]
+    fn key_tokens_preserve_configurable_chords() {
+        assert_eq!(
+            key_token(KeyCode::Char('c'), KeyModifiers::CONTROL).as_deref(),
+            Some("ctrl+c")
+        );
+        assert_eq!(
+            key_token(KeyCode::Char('G'), KeyModifiers::SHIFT).as_deref(),
+            Some("G")
+        );
+        assert_eq!(
+            key_token(KeyCode::Char(' '), KeyModifiers::NONE).as_deref(),
+            Some("space")
+        );
+        assert_eq!(
+            key_token(KeyCode::PageDown, KeyModifiers::ALT).as_deref(),
+            Some("alt+pagedown")
+        );
+        assert_eq!(
+            key_token(KeyCode::Backspace, KeyModifiers::NONE).as_deref(),
+            Some("backspace")
+        );
+    }
 }

@@ -5,5 +5,6 @@
 //! function among future open/resize/preview helpers.
 
 pub mod cli;
+pub mod launch;
 
-pub use cli::set_pane_label;
+pub use cli::{report_sidebar_heartbeat, set_pane_label, SIDEBAR_LABEL, SIDEBAR_TOKEN};

@@ -16,14 +16,16 @@
 
 pub mod app;
 pub mod config;
+pub mod diffview;
 pub mod feature;
+pub mod git;
 pub mod herdr;
 pub mod host;
 pub mod ui;
 
 pub use feature::{Feature, FeatureView, KeyOutcome};
 pub use host::{LaunchContext, Mode};
-pub use ui::{NerdFontSupport, Palette, has_nerd_font};
+pub use ui::{has_nerd_font, NerdFontSupport, Palette};
 
 /// Entry point invoked by the binary (plugin pane or standalone).
 pub fn run() -> std::io::Result<()> {

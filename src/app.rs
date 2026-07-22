@@ -5,11 +5,11 @@
 //! - Explorer / SCM / GitHub switch in-process via the top icon row
 //! - previews are NOT drawn here (separate pane later via control file)
 //!
-//! Key ownership:
-//! - **shell**: `q`, `Ctrl-C`, `1`/`2`/`3`, activity icon clicks
-//! - **active feature body**: everything else (`j`/`k`, …) via [`FeatureView`]
+//! Key ownership is configured entirely through `config.sh`. The shell handles
+//! global action names (quit / feature switching); active views handle the
+//! remaining configured actions. Activity icon clicks remain direct mouse UI.
 
-use crate::config::Config;
+use crate::config::{self, Config};
 use crate::feature::{Feature, KeyOutcome, Views};
 use crate::herdr;
 use crate::host::LaunchContext;
@@ -19,7 +19,7 @@ use crossterm::event::{
 };
 use crossterm::execute;
 use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
@@ -27,7 +27,9 @@ use ratatui::{Frame, Terminal};
 use std::io::{self, Stdout};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 
 struct State {
     feature: Feature,
@@ -35,6 +37,7 @@ struct State {
     config: Arc<Config>,
     /// Last label pushed to Herdr (avoid spamming rename every frame).
     labeled_as: Option<&'static str>,
+    last_heartbeat: Option<Instant>,
     nav_hits: Vec<(Feature, Rect)>,
 }
 
@@ -45,6 +48,7 @@ impl State {
             views: Views::new(&ctx.cwd, nerd_font, Arc::clone(&config)),
             config,
             labeled_as: None,
+            last_heartbeat: None,
             nav_hits: Vec::new(),
         }
     }
@@ -71,11 +75,17 @@ fn event_loop(
 ) -> io::Result<()> {
     let mut state = State::new(ctx, use_nf, config);
 
-    // Initial Herdr border title = active feature.
+    // Stable label + metadata identify this process independently of its
+    // active feature. Activity identity remains inside the top icon strip.
     sync_pane_label(&mut state, ctx);
+    sync_sidebar_heartbeat(&mut state, ctx);
     state.views.get_mut(state.feature).on_activate();
 
     loop {
+        // Tick before polling so continuous mouse/key input cannot starve live
+        // refresh; expensive views rate-limit themselves.
+        state.views.get_mut(state.feature).on_tick();
+        sync_sidebar_heartbeat(&mut state, ctx);
         terminal.draw(|frame| {
             state.nav_hits.clear();
             draw(frame, palette, use_nf, &mut state);
@@ -91,8 +101,13 @@ fn event_loop(
                 match handle_key(&mut state, key.code, key.modifiers) {
                     KeyHandle::Quit => break,
                     KeyHandle::Continue => {}
-                    KeyHandle::Shell { action, file } => {
-                        run_shell_action(terminal, &state, &action, file.as_deref())?;
+                    KeyHandle::Shell { action, file, env } => {
+                        let ok =
+                            run_shell_action(terminal, &state, &action, file.as_deref(), &env)?;
+                        state
+                            .views
+                            .get_mut(state.feature)
+                            .on_shell_result(&action, ok);
                     }
                 }
                 if state.feature != before {
@@ -104,20 +119,29 @@ fn event_loop(
                 if matches!(m.kind, MouseEventKind::Down(MouseButton::Left)) {
                     let before = state.feature;
                     if !handle_activity_click(&mut state, m.column, m.row) {
-                        if let KeyOutcome::Shell { action, file } =
+                        if let KeyOutcome::Shell { action, file, env } =
                             state.views.get_mut(state.feature).on_mouse(m)
                         {
-                            run_shell_action(terminal, &state, &action, file.as_deref())?;
+                            let ok =
+                                run_shell_action(terminal, &state, &action, file.as_deref(), &env)?;
+                            state
+                                .views
+                                .get_mut(state.feature)
+                                .on_shell_result(&action, ok);
                         }
                     }
                     if state.feature != before {
                         state.views.get_mut(state.feature).on_activate();
                         sync_pane_label(&mut state, ctx);
                     }
-                } else if let KeyOutcome::Shell { action, file } =
+                } else if let KeyOutcome::Shell { action, file, env } =
                     state.views.get_mut(state.feature).on_mouse(m)
                 {
-                    run_shell_action(terminal, &state, &action, file.as_deref())?;
+                    let ok = run_shell_action(terminal, &state, &action, file.as_deref(), &env)?;
+                    state
+                        .views
+                        .get_mut(state.feature)
+                        .on_shell_result(&action, ok);
                 }
             }
             _ => {}
@@ -129,7 +153,11 @@ fn event_loop(
 enum KeyHandle {
     Quit,
     Continue,
-    Shell { action: String, file: Option<PathBuf> },
+    Shell {
+        action: String,
+        file: Option<PathBuf>,
+        env: Vec<(String, String)>,
+    },
 }
 
 fn run_shell_action(
@@ -137,7 +165,8 @@ fn run_shell_action(
     state: &State,
     action: &str,
     file: Option<&std::path::Path>,
-) -> io::Result<()> {
+    env: &[(String, String)],
+) -> io::Result<bool> {
     // Hosted Herdr actions (split/send-text) must NOT leave the alt-screen — that
     // flash is what users see when open fails or only needs the herdr CLI.
     // Standalone $EDITOR still needs a real TTY: probe first with a dry convention
@@ -146,8 +175,8 @@ fn run_shell_action(
 
     if hosted {
         // Keep TUI up; capture action stdout/stderr.
-        let _ = state.config.run_shell(action, file, &[], false);
-        return Ok(());
+        let result = state.config.run_shell(action, file, env, false);
+        return Ok(result.ok);
     }
 
     // Standalone: suspend TUI for $EDITOR.
@@ -159,7 +188,7 @@ fn run_shell_action(
     );
     let _ = terminal.show_cursor();
 
-    let _ = state.config.run_shell(action, file, &[], true);
+    let result = state.config.run_shell(action, file, env, true);
 
     enable_raw_mode()?;
     execute!(
@@ -169,11 +198,11 @@ fn run_shell_action(
     )?;
     let _ = terminal.hide_cursor();
     terminal.clear()?;
-    Ok(())
+    Ok(result.ok)
 }
 
 fn sync_pane_label(state: &mut State, ctx: &LaunchContext) {
-    let title = state.feature.title();
+    let title = herdr::SIDEBAR_LABEL;
     if state.labeled_as == Some(title) {
         return;
     }
@@ -184,28 +213,52 @@ fn sync_pane_label(state: &mut State, ctx: &LaunchContext) {
     }
 }
 
-/// Shell keys first; everything else goes to the active feature body.
-fn handle_key(state: &mut State, code: KeyCode, mods: KeyModifiers) -> KeyHandle {
-    // --- shell chords (never stolen by features) ---
-    match code {
-        KeyCode::Char('q') => return KeyHandle::Quit,
-        KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => return KeyHandle::Quit,
-        KeyCode::Esc => return KeyHandle::Continue,
+fn sync_sidebar_heartbeat(state: &mut State, ctx: &LaunchContext) {
+    if state
+        .last_heartbeat
+        .is_some_and(|last| last.elapsed() < HEARTBEAT_INTERVAL)
+    {
+        return;
+    }
+    if herdr::report_sidebar_heartbeat(ctx.herdr_bin(), ctx.self_pane_id()) {
+        state.last_heartbeat = Some(Instant::now());
+    }
+}
 
-        // Feature switch: digits only.
-        KeyCode::Char(c @ '1'..='3') => {
-            if let Some(f) = Feature::from_digit(c) {
-                state.feature = f;
-            }
-            return KeyHandle::Continue;
-        }
-        _ => {}
+/// Resolve configured global actions first; views dispatch everything else.
+fn handle_key(state: &mut State, code: KeyCode, mods: KeyModifiers) -> KeyHandle {
+    if state.views.get(state.feature).captures_text_input() {
+        return key_outcome(state.views.get_mut(state.feature).on_key(code, mods));
     }
 
-    // --- body ---
-    match state.views.get_mut(state.feature).on_key(code, mods) {
+    if let Some(action) =
+        config::key_token(code, mods).and_then(|token| state.config.action_for_key(&token))
+    {
+        match action {
+            config::internal::QUIT => return KeyHandle::Quit,
+            config::internal::FEATURE_EXPLORER => {
+                state.feature = Feature::Explorer;
+                return KeyHandle::Continue;
+            }
+            config::internal::FEATURE_SCM => {
+                state.feature = Feature::Scm;
+                return KeyHandle::Continue;
+            }
+            config::internal::FEATURE_GITHUB => {
+                state.feature = Feature::GitHub;
+                return KeyHandle::Continue;
+            }
+            _ => {}
+        }
+    }
+
+    key_outcome(state.views.get_mut(state.feature).on_key(code, mods))
+}
+
+fn key_outcome(outcome: KeyOutcome) -> KeyHandle {
+    match outcome {
         KeyOutcome::Handled | KeyOutcome::Ignored => KeyHandle::Continue,
-        KeyOutcome::Shell { action, file } => KeyHandle::Shell { action, file },
+        KeyOutcome::Shell { action, file, env } => KeyHandle::Shell { action, file, env },
     }
 }
 

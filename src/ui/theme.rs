@@ -15,7 +15,7 @@
 //! # Usage
 //!
 //! ```no_run
-//! use corral::theme::Palette;
+//! use corral::ui::Palette;
 //! let p = Palette::resolve();     // Herdr config if present, else terminal
 //! let accent = p.accent;          // ratatui::style::Color, ready for any TUI
 //! ```
