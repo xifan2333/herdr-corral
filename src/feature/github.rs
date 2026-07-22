@@ -1180,26 +1180,33 @@ fn draw_header(
     palette: &Palette,
 ) {
     let (title, badge) = header_columns(rect, count);
+    let title_style = if background == Color::Reset {
+        Style::default().fg(palette.text)
+    } else {
+        Style::default().fg(palette.text).bg(background)
+    };
     frame.render_widget(
         Paragraph::new(Line::from(vec![
+            Span::raw(" "),
             Span::styled(
-                if collapsed { " ▸ " } else { " ▾ " },
-                Style::default().fg(palette.subtext0),
+                if collapsed { "▸ " } else { "▾ " },
+                title_style.add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                section.title(),
-                Style::default()
-                    .fg(palette.text)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            Span::styled(section.title(), title_style.add_modifier(Modifier::BOLD)),
         ]))
-        .style(Style::default().bg(background)),
+        .style(title_style),
         title,
     );
+    // Match SCM: independent right-side count badge with accent fill.
     frame.render_widget(
-        Paragraph::new(format!(" {count} "))
-            .alignment(Alignment::Right)
-            .style(Style::default().fg(palette.accent).bg(background)),
+        Paragraph::new(count.to_string())
+            .alignment(Alignment::Center)
+            .style(
+                Style::default()
+                    .fg(palette.panel_bg)
+                    .bg(palette.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
         badge,
     );
 }
@@ -1309,6 +1316,13 @@ fn run_line<'a>(run: &'a WorkflowRun, palette: &Palette) -> Line<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn section_count_is_a_separate_right_badge() {
+        let (title, badge) = header_columns(Rect::new(4, 7, 30, 1), 19);
+        assert_eq!(title, Rect::new(4, 7, 26, 1));
+        assert_eq!(badge, Rect::new(30, 7, 4, 1));
+    }
 
     struct UnusedAdapter;
 
