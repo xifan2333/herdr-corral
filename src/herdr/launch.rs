@@ -9,7 +9,7 @@
 use serde::Deserialize;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::cli::{SIDEBAR_LABEL, SIDEBAR_TOKEN};
+use super::cli::SIDEBAR_TOKEN;
 
 const TARGET_COLS: f64 = 32.0;
 const HEARTBEAT_STALE_SECS: u64 = 20;
@@ -28,7 +28,6 @@ struct PaneListResult {
 #[derive(Deserialize)]
 struct Pane {
     pane_id: Option<String>,
-    label: Option<String>,
     cwd: Option<String>,
     #[serde(default)]
     focused: bool,
@@ -119,8 +118,9 @@ fn launch_decision_at(pane_list_json: &str, now: u64) -> String {
         .iter()
         .filter(|pane| {
             pane.tab_id.as_deref() == Some(tab_id)
-                && (pane.tokens.contains_key(SIDEBAR_TOKEN)
-                    || pane.label.as_deref() == Some(SIDEBAR_LABEL))
+                // Labels are cosmetic and user-controlled. Only our metadata
+                // token authorizes focus or destructive stale replacement.
+                && pane.tokens.contains_key(SIDEBAR_TOKEN)
         })
         .filter_map(|pane| {
             pane.pane_id
@@ -321,7 +321,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_or_missing_heartbeat_is_replaced() {
+    fn stale_owned_heartbeat_is_replaced_but_label_only_is_ignored() {
         let stale = pane_list(
             r#"{"pane_id":"w:p1","focused":true,"tab_id":"w:t1"},
                {"pane_id":"w:p2","label":"Corral","tab_id":"w:t1","tokens":{"corral-sidebar":"50"}}"#,
@@ -331,7 +331,7 @@ mod tests {
             r#"{"pane_id":"w:p1","focused":true,"tab_id":"w:t1"},
                {"pane_id":"w:p2","label":"Corral","tab_id":"w:t1"}"#,
         );
-        assert_eq!(launch_decision_at(&missing, 100), "REPLACE w:p2");
+        assert_eq!(launch_decision_at(&missing, 100), "OPEN");
     }
 
     #[test]

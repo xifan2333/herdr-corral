@@ -148,33 +148,99 @@ impl Git {
                 "log",
                 "--graph",
                 "--oneline",
-                "--decorate",
+                "--decorate=short",
                 &format!("-{limit}"),
             ],
         )
     }
 
     pub fn commits(&self, limit: usize) -> Result<Vec<String>, String> {
-        git_lines(&self.root, &["log", "--oneline", &format!("-{limit}")])
+        git_lines(
+            &self.root,
+            &["log", "--format=%h%x09%d %s", &format!("-{limit}")],
+        )
     }
 
     pub fn file_history(&self, path: &str, limit: usize) -> Result<Vec<String>, String> {
         git_lines(
             &self.root,
-            &["log", "--oneline", &format!("-{limit}"), "--", path],
+            &[
+                "log",
+                "--format=%h%x09%s",
+                "--follow",
+                &format!("-{limit}"),
+                "--",
+                path,
+            ],
         )
     }
 
     pub fn branches(&self) -> Result<Vec<String>, String> {
-        git_lines(&self.root, &["branch", "--format=%(refname:short)"])
+        git_lines(
+            &self.root,
+            &[
+                "branch",
+                "-a",
+                "--sort=-committerdate",
+                "--format=%(HEAD)%09%(refname:short)",
+            ],
+        )
     }
 
     pub fn worktrees(&self) -> Result<Vec<String>, String> {
-        git_lines(&self.root, &["worktree", "list"])
+        let raw = run_in(&self.root, &["worktree", "list", "--porcelain"])?;
+        Ok(raw
+            .split("\n\n")
+            .filter_map(|block| {
+                let mut path = None;
+                let mut label = None;
+                for line in block.lines() {
+                    if let Some(value) = line.strip_prefix("worktree ") {
+                        path = Some(value.to_string());
+                    } else if let Some(value) = line.strip_prefix("branch refs/heads/") {
+                        label = Some(value.to_string());
+                    } else if line == "detached" {
+                        label = Some("(detached)".into());
+                    } else if line == "bare" {
+                        label = Some("(bare)".into());
+                    }
+                }
+                path.map(|path| format!("{path}\t{}", label.unwrap_or_default()))
+            })
+            .collect())
     }
 
     pub fn remotes(&self) -> Result<Vec<String>, String> {
-        git_lines(&self.root, &["remote", "-v"])
+        let lines = git_lines(&self.root, &["remote", "-v"])?;
+        let mut seen = std::collections::HashSet::new();
+        Ok(lines
+            .into_iter()
+            .filter_map(|line| {
+                let mut fields = line.split_whitespace();
+                let name = fields.next()?;
+                let url = fields.next()?;
+                let kind = fields.next()?;
+                if kind != "(fetch)" || !seen.insert(name.to_string()) {
+                    return None;
+                }
+                Some(format!("{name}\t{url}"))
+            })
+            .collect())
+    }
+
+    pub fn stashes(&self) -> Result<Vec<String>, String> {
+        git_lines(&self.root, &["stash", "list", "--format=%gd%x09%s"])
+    }
+
+    pub fn tags(&self) -> Result<Vec<String>, String> {
+        git_lines(
+            &self.root,
+            &[
+                "tag",
+                "--sort=-creatordate",
+                "--format=%(refname:short)%09%(subject)",
+            ],
+        )
     }
 
     /// Synchronize the current branch without blocking the TUI caller.
@@ -183,14 +249,17 @@ impl Git {
         if !status.has_upstream {
             return Err("branch has no upstream".into());
         }
-        if status.behind > 0 {
+        // Refresh divergence first; the status snapshot captured by the TUI can
+        // predate a remote update and must not decide whether to pull.
+        run_in(&self.root, &["fetch"])?;
+        let fresh = self.status()?;
+        if fresh.behind > 0 {
             run_in(&self.root, &["pull", "--rebase", "--autostash"])?;
         }
-        if status.ahead > 0 || status.behind > 0 {
+        if fresh.ahead > 0 || fresh.behind > 0 {
             run_in(&self.root, &["push"])?;
             Ok("sync complete".into())
         } else {
-            run_in(&self.root, &["fetch"])?;
             Ok("already up to date".into())
         }
     }
@@ -234,6 +303,9 @@ fn unstage_pathspecs(entry: &FileEntry) -> Vec<&str> {
 
 fn run_in(dir: &Path, args: &[&str]) -> Result<String, String> {
     let out = Command::new("git")
+        // Porcelain paths are literal filenames. Without this global option a
+        // valid name such as `:(glob)*` can match and mutate unrelated files.
+        .arg("--literal-pathspecs")
         .arg("-c")
         .arg("color.ui=false")
         .args(args)
@@ -474,6 +546,8 @@ mod tests {
         git_cmd(&["config", "user.email", "test@example.com"]);
         git_cmd(&["config", "user.name", "Test"]);
         std::fs::write(root.join("tracked.txt"), "base\n").unwrap();
+        std::fs::write(root.join(":(glob)*"), "magic base\n").unwrap();
+        std::fs::write(root.join("normal"), "normal base\n").unwrap();
         git_cmd(&["add", "."]);
         git_cmd(&["commit", "-qm", "base"]);
 
@@ -485,9 +559,37 @@ mod tests {
             "base\n"
         );
 
+        // A porcelain filename that looks like pathspec magic must remain
+        // literal: discarding it cannot touch the unrelated dirty file.
+        std::fs::write(root.join(":(glob)*"), "magic changed\n").unwrap();
+        std::fs::write(root.join("normal"), "normal changed\n").unwrap();
+        git.discard(&entry(":(glob)*", 'M', None)).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join(":(glob)*")).unwrap(),
+            "magic base\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("normal")).unwrap(),
+            "normal changed\n"
+        );
+
         std::fs::write(root.join("new.txt"), "new\n").unwrap();
         git.discard(&entry("new.txt", 'U', None)).unwrap();
         assert!(!root.join("new.txt").exists());
+
+        git_cmd(&["tag", "v1.0"]);
+        assert!(git
+            .tags()
+            .unwrap()
+            .iter()
+            .any(|line| line.starts_with("v1.0\t")));
+        git_cmd(&["stash", "push", "-qm", "drawer test"]);
+        assert!(git
+            .stashes()
+            .unwrap()
+            .iter()
+            .any(|line| line.starts_with("stash@{0}\t")));
+
         std::fs::remove_dir_all(root).unwrap();
     }
 }

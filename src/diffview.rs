@@ -83,8 +83,10 @@ fn parse(diff: &str) -> Vec<Ev> {
     let mut evs = Vec::new();
     let mut o = 0usize;
     let mut n = 0usize;
+    let mut in_hunk = false;
     for line in diff.lines() {
         if let Some(rest) = line.strip_prefix("diff --git ") {
+            in_hunk = false;
             evs.push(Ev::File(file_name(rest)));
             continue;
         }
@@ -107,7 +109,14 @@ fn parse(diff: &str) -> Vec<Ev> {
             let (no, nn, section) = parse_hunk(line);
             o = no;
             n = nn;
+            in_hunk = true;
             evs.push(Ev::Hunk(section));
+            continue;
+        }
+        // Commit messages, `git show --stat` output (including its bare `---`
+        // separator), and file metadata are not diff-body lines. A leading
+        // `+`/`-` only has add/delete meaning after an explicit hunk header.
+        if !in_hunk {
             continue;
         }
         match line.as_bytes().first() {
@@ -452,5 +461,28 @@ mod tests {
         let out = render(diff, &Palette::named("catppuccin").unwrap(), 80);
         assert!(out.contains("f.rs"));
         assert!(out.contains("\x1b["));
+    }
+
+    #[test]
+    fn stat_separator_outside_hunk_is_not_a_deletion() {
+        let diff = "commit abc123\n\n    subject\n\n---\n f.rs | 2 +-\n\ndiff --git a/f.rs b/f.rs\n--- a/f.rs\n+++ b/f.rs\n@@ -1 +1 @@\n-old\n+new\n";
+        let events = parse(diff);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, Ev::Del(..)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, Ev::Add(..)))
+                .count(),
+            1
+        );
+        assert!(!events
+            .iter()
+            .any(|event| { matches!(event, Ev::Del(_, text) if text == "--") }));
     }
 }

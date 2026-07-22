@@ -3,7 +3,9 @@
 # On first run Corral copies this to your editable config:
 #   plugin:     $(herdr plugin config-dir corral)/config.sh
 #   standalone: ${XDG_CONFIG_HOME:-~/.config}/corral/config.sh
-# Edit THAT file — no recompile needed. Delete it to re-seed from this default.
+# Edit THAT file — no recompile needed. Future migrations use this in-place
+# version and preserve customized bindings/functions.
+CORRAL_CONFIG_VERSION=1
 #
 # River-style: call `corral bind <key> <action>` (like `riverctl map …`).
 #   global actions: quit feature-explorer feature-scm feature-github
@@ -59,6 +61,99 @@ corral bind home edit-home
 corral bind end edit-end
 
 CORRAL_EDITOR_LABEL="Corral Editor"
+CORRAL_EDITOR_TOKEN="corral-editor-owner"
+
+_corral_valid_pane_id() {
+  [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9:._-]*$ ]]
+}
+
+_corral_runtime_dir() {
+  local base="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}" dir
+  dir="$base/corral-${UID:-$(id -u)}"
+  mkdir -p "$dir" || return 1
+  chmod 700 "$dir" || return 1
+  printf '%s' "$dir"
+}
+
+_corral_nvim_socket() {
+  local owner=$1 key runtime
+  key=${owner//[^A-Za-z0-9_.-]/_}
+  runtime="$(_corral_runtime_dir)" || return 1
+  printf '%s/nvim-%s.sock' "$runtime" "$key"
+}
+
+_corral_owned_editor() {
+  local herdr=$1 owner=$2
+  "$herdr" pane list 2>/dev/null \
+    | jq -r --arg token "$CORRAL_EDITOR_TOKEN" --arg owner "$owner" \
+        'first(.result.panes[] | select(.tokens[$token] == $owner) | .pane_id) // empty' 2>/dev/null
+}
+
+_corral_focus_pane() {
+  local herdr=$1 pane=$2
+  "$herdr" pane zoom "$pane" --on >/dev/null 2>&1 \
+    && "$herdr" pane zoom "$pane" --off >/dev/null 2>&1
+}
+
+_corral_nvim_ready() {
+  local herdr=$1 pane=$2 socket=$3 nvim=$4
+  [[ -S "$socket" ]] || return 1
+  "$herdr" pane process-info --pane "$pane" 2>/dev/null \
+    | jq -e 'any(.result.process_info.foreground_processes[]?; .name == "nvim")' >/dev/null \
+    || return 1
+  [[ "$("$nvim" --server "$socket" --remote-expr '1' 2>/dev/null || true)" == 1 ]]
+}
+
+# Ensure one owner-scoped nvim RPC instance and echo "pane<TAB>socket<TAB>nvim".
+_corral_ensure_nvim() {
+  local herdr="$HERDR_BIN_PATH" owner="${HERDR_PANE_ID:-}" editor nvim socket pid out cmd
+  _corral_valid_pane_id "$owner" || return 1
+  editor="${CORRAL_EDITOR:-${EDITOR:-${VISUAL:-nvim}}}"
+  nvim="$(command -v "${editor%% *}" 2>/dev/null || true)"
+  [[ -n "$nvim" && "$(basename "$nvim")" == nvim ]] || {
+    printf 'corral: hosted pane reuse currently requires nvim\n' >&2
+    return 1
+  }
+  socket="$(_corral_nvim_socket "$owner")" || return 1
+  pid="$(_corral_owned_editor "$herdr" "$owner" || true)"
+  [[ -z "$pid" ]] || _corral_valid_pane_id "$pid" || return 1
+
+  if [[ -n "$pid" ]]; then
+    _corral_nvim_ready "$herdr" "$pid" "$socket" "$nvim" || {
+      printf 'corral: owned editor is not the expected nvim RPC instance\n' >&2
+      return 1
+    }
+    _corral_focus_pane "$herdr" "$pid" || return 1
+    printf '%s\t%s\t%s' "$pid" "$socket" "$nvim"
+    return 0
+  fi
+
+  rm -f -- "$socket"
+  out="$("$herdr" pane split "$owner" --direction right --focus --ratio 0.75 2>&1)" || return 1
+  pid="$(printf '%s' "$out" | jq -r '.result.pane.pane_id // empty' 2>/dev/null || true)"
+  _corral_valid_pane_id "$pid" || return 1
+  if ! "$herdr" pane report-metadata "$pid" --source corral-editor \
+      --token "$CORRAL_EDITOR_TOKEN=$owner" >/dev/null 2>&1 \
+    || ! "$herdr" pane rename "$pid" "$CORRAL_EDITOR_LABEL" >/dev/null 2>&1; then
+    "$herdr" pane close "$pid" >/dev/null 2>&1 || true
+    return 1
+  fi
+  printf -v cmd 'exec %q --listen %q' "$nvim" "$socket"
+  if ! "$herdr" pane run "$pid" "$cmd" >/dev/null 2>&1; then
+    "$herdr" pane close "$pid" >/dev/null 2>&1 || true
+    return 1
+  fi
+  for _ in $(seq 1 40); do
+    if _corral_nvim_ready "$herdr" "$pid" "$socket" "$nvim"; then
+      printf '%s\t%s\t%s' "$pid" "$socket" "$nvim"
+      return 0
+    fi
+    sleep 0.05
+  done
+  "$herdr" pane close "$pid" >/dev/null 2>&1 || true
+  rm -f -- "$socket"
+  return 1
+}
 
 open() {
   local file="${1:-${CORRAL_FILE:-}}"
@@ -70,34 +165,11 @@ open() {
   # --- herdr ---
   if [[ -n "${HERDR_BIN_PATH:-}" && -n "${HERDR_ENV:-}" ]]; then
     echo CORRAL_SUSPEND=0
-    local herdr="$HERDR_BIN_PATH" pid out
-    pid="$("$herdr" pane list 2>/dev/null \
-      | jq -r --arg l "$CORRAL_EDITOR_LABEL" \
-          'first(.result.panes[] | select(.label == $l) | .pane_id) // empty' 2>/dev/null || true)"
-
-    if [[ -z "$pid" ]]; then
-      out="$("$herdr" pane split --current --direction right --focus --ratio 0.75 2>&1)" || return 1
-      pid="$(printf '%s' "$out" | jq -r '.result.pane.pane_id // empty' 2>/dev/null || true)"
-      [[ -n "$pid" ]] || return 1
-      "$herdr" pane rename "$pid" "$CORRAL_EDITOR_LABEL" >/dev/null 2>&1 || true
-      "$herdr" pane send-text "$pid" "$editor $qfile" >/dev/null
-      "$herdr" pane send-keys "$pid" enter >/dev/null
-    else
-      "$herdr" pane zoom "$pid" --on >/dev/null 2>&1 || true
-      "$herdr" pane zoom "$pid" --off >/dev/null 2>&1 || true
-      case "$editor" in
-        *nvim*|*vim*|*vi)
-          "$herdr" pane send-keys "$pid" esc >/dev/null
-          "$herdr" pane send-text "$pid" ":edit $vfile" >/dev/null
-          "$herdr" pane send-keys "$pid" enter >/dev/null
-          ;;
-        *)
-          "$herdr" pane send-keys "$pid" ctrl+c >/dev/null
-          "$herdr" pane send-text "$pid" "$editor $qfile" >/dev/null
-          "$herdr" pane send-keys "$pid" enter >/dev/null
-          ;;
-      esac
-    fi
+    local endpoint pid socket nvim
+    endpoint="$(_corral_ensure_nvim)" || return 1
+    IFS=$'\t' read -r pid socket nvim <<<"$endpoint"
+    "$nvim" --server "$socket" --remote "$file" >/dev/null 2>&1 || return 1
+    _corral_focus_pane "$HERDR_BIN_PATH" "$pid" || return 1
     return 0
   fi
 
@@ -147,31 +219,29 @@ open() {
   exec $editor "$file"
 }
 
-# --- shared: find or create the reused Corral side pane (herdr), echo pane id ---
-_corral_pane() {
-  local herdr="$HERDR_BIN_PATH" pid out
-  pid="$("$herdr" pane list 2>/dev/null \
-    | jq -r --arg l "$CORRAL_EDITOR_LABEL" \
-        'first(.result.panes[] | select(.label == $l) | .pane_id) // empty' 2>/dev/null || true)"
-  if [[ -z "$pid" ]]; then
-    out="$("$herdr" pane split --current --direction right --focus --ratio 0.75 2>&1)" || return 1
-    pid="$(printf '%s' "$out" | jq -r '.result.pane.pane_id // empty' 2>/dev/null || true)"
-    [[ -n "$pid" ]] || return 1
-    "$herdr" pane rename "$pid" "$CORRAL_EDITOR_LABEL" >/dev/null 2>&1 || true
-  else
-    "$herdr" pane zoom "$pid" --on >/dev/null 2>&1 || true
-    "$herdr" pane zoom "$pid" --off >/dev/null 2>&1 || true
-  fi
-  printf '%s' "$pid"
-}
-
-# Send a command line into the reused pane, interrupting whatever runs there.
+# Run a generated preview command in a terminal buffer inside the SAME owned
+# nvim pane. The command is stored in a private temporary script, so neither
+# shell syntax nor filenames are injected as nvim keystrokes/Ex source.
 _corral_run() {
-  local cmd="$1" herdr="$HERDR_BIN_PATH" pid
-  pid="$(_corral_pane)" || return 1
-  "$herdr" pane send-keys "$pid" ctrl+c >/dev/null 2>&1 || true
-  "$herdr" pane send-text "$pid" "$cmd" >/dev/null
-  "$herdr" pane send-keys "$pid" enter >/dev/null
+  local cmd="$1" endpoint pid socket nvim runtime script vim_path expr
+  endpoint="$(_corral_ensure_nvim)" || return 1
+  IFS=$'\t' read -r pid socket nvim <<<"$endpoint"
+  runtime="$(_corral_runtime_dir)" || return 1
+  script="$(mktemp "$runtime/preview.XXXXXX")" || return 1
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'trap '\''rm -f -- "$0"'\'' EXIT\n'
+    printf 'set -o pipefail\n'
+    printf '%s\n' "$cmd"
+  } >"$script" || { rm -f -- "$script"; return 1; }
+  chmod 700 "$script" || { rm -f -- "$script"; return 1; }
+  vim_path="$(printf '%s' "$script" | jq -Rs .)" || { rm -f -- "$script"; return 1; }
+  expr="execute('enew | setlocal nonumber norelativenumber signcolumn=no foldcolumn=0 | terminal ' . fnameescape($vim_path))"
+  if ! "$nvim" --server "$socket" --remote-expr "$expr" >/dev/null 2>&1; then
+    rm -f -- "$script"
+    return 1
+  fi
+  _corral_focus_pane "$HERDR_BIN_PATH" "$pid"
 }
 
 # Diff renderer for SCM previews:
@@ -197,9 +267,9 @@ _corral_diff_source() {
   paths=$qfile
   [[ -n "$qorig" ]] && paths="$paths $qorig"
   case "$kind" in
-    staged) printf 'git -C %s %sdiff --cached -- %s' "$qdir" "$color_arg" "$paths" ;;
-    untracked) printf '{ git -C %s %sdiff --no-index -- /dev/null %s || test $? -eq 1; }' "$qdir" "$color_arg" "$qfile" ;;
-    *) printf 'git -C %s %sdiff -- %s' "$qdir" "$color_arg" "$paths" ;;
+    staged) printf 'git -C %s --literal-pathspecs %sdiff --cached -- %s' "$qdir" "$color_arg" "$paths" ;;
+    untracked) printf '{ git -C %s --literal-pathspecs %sdiff --no-index -- /dev/null %s || test $? -eq 1; }' "$qdir" "$color_arg" "$qfile" ;;
+    *) printf 'git -C %s --literal-pathspecs %sdiff -- %s' "$qdir" "$color_arg" "$paths" ;;
   esac
 }
 
@@ -230,7 +300,7 @@ _corral_diff_cmd() {
         else
           local cached=""
           [[ "$kind" == staged ]] && cached='--cached '
-          printf 'DFT_COLOR=always GIT_EXTERNAL_DIFF=%q git -C %s --no-pager diff %s-- %s %s | less -R' "$bin" "$qdir" "$cached" "$qfile" "$qorig"
+          printf 'DFT_COLOR=always GIT_EXTERNAL_DIFF=%q git -C %s --literal-pathspecs --no-pager diff %s-- %s %s | less -R' "$bin" "$qdir" "$cached" "$qfile" "$qorig"
         fi
         return
       fi
@@ -281,6 +351,39 @@ _corral_show_diff() {
 diff() { _corral_show_diff unstaged "$@"; }
 diff_staged() { _corral_show_diff staged "$@"; }
 diff_untracked() { _corral_show_diff untracked "$@"; }
+
+# Show a commit/branch reference, optionally restricted to the File History path.
+show_ref() {
+  local dir="${CORRAL_GIT_ROOT:-${1:-.}}" ref="${CORRAL_GIT_REF:-}" path="${CORRAL_GIT_PATH:-}"
+  local qdir qref qpath source renderer cmd
+  [[ -n "$ref" ]] || return 1
+  qdir=$(printf '%q' "$dir"); qref=$(printf '%q' "$ref")
+  source="git -C $qdir --literal-pathspecs show --format=fuller --stat --patch --end-of-options $qref"
+  if [[ -n "$path" ]]; then
+    qpath=$(printf '%q' "$path")
+    source="$source -- $qpath"
+  fi
+  renderer=$(command -v corral-diff 2>/dev/null || true)
+  if [[ -n "$renderer" ]]; then
+    printf -v cmd '%s | %q | less -R' "$source" "$renderer"
+  else
+    cmd="$source | less -R"
+  fi
+  if [[ -n "${HERDR_BIN_PATH:-}" && -n "${HERDR_ENV:-}" ]]; then
+    echo CORRAL_SUSPEND=0
+    _corral_run "$cmd"
+  else
+    echo CORRAL_SUSPEND=1
+    eval "$cmd"
+  fi
+}
+
+# Worktree activation opens its root in the same owner-scoped nvim instance.
+open_worktree() {
+  local path="${CORRAL_WORKTREE_PATH:-${1:-}}"
+  [[ -n "$path" && -d "$path" ]] || return 1
+  open "$path"
+}
 
 # Commit the SCM panel's inline message. The TUI receives success/failure and
 # keeps the message on failure; no terminal handoff is needed.

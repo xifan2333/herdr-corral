@@ -19,7 +19,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 use ratatui::Frame;
 use std::cell::Cell;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -75,6 +75,99 @@ fn display_path_parts(path: &str) -> (&str, Option<&str>) {
     }
 }
 
+fn log_drawer_item(line: String) -> DrawerItem {
+    match line.split_once('\t') {
+        Some((reference, subject)) => DrawerItem {
+            display: format!("{reference} {subject}"),
+            reference: Some(reference.to_string()),
+        },
+        None => DrawerItem {
+            display: line,
+            reference: None,
+        },
+    }
+}
+
+fn graph_drawer_item(line: String) -> DrawerItem {
+    let reference = line
+        .split_whitespace()
+        .find(|word| word.len() >= 7 && word.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .map(str::to_string);
+    DrawerItem {
+        display: line,
+        reference,
+    }
+}
+
+fn branch_drawer_item(line: String) -> DrawerItem {
+    match line.split_once('\t') {
+        Some((head, name)) if !name.is_empty() => DrawerItem {
+            display: format!("{}{}", if head == "*" { "* " } else { "  " }, name),
+            reference: Some(name.to_string()),
+        },
+        _ => DrawerItem {
+            display: line,
+            reference: None,
+        },
+    }
+}
+
+fn worktree_drawer_item(line: String) -> DrawerItem {
+    match line.split_once('\t') {
+        Some((path, label)) => {
+            let name = Path::new(path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .filter(|name| !name.is_empty())
+                .unwrap_or(path);
+            DrawerItem {
+                display: format!("{name}  {label}"),
+                reference: Some(path.to_string()),
+            }
+        }
+        _ => DrawerItem {
+            display: line,
+            reference: None,
+        },
+    }
+}
+
+fn short_remote_url(url: &str) -> &str {
+    let url = url.strip_suffix(".git").unwrap_or(url);
+    if let Some(rest) = url.strip_prefix("file://") {
+        return Path::new(rest)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(rest);
+    }
+    if let Some((_, rest)) = url.split_once("://") {
+        return rest.split_once('/').map_or(rest, |(_, path)| path);
+    }
+    if url
+        .split_once(':')
+        .is_some_and(|(host, _)| host.contains('@'))
+    {
+        return url.split_once(':').map_or(url, |(_, path)| path);
+    }
+    Path::new(url)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(url)
+}
+
+fn remote_drawer_item(line: String) -> DrawerItem {
+    match line.split_once('\t') {
+        Some((name, url)) => DrawerItem {
+            display: format!("{name}  {}", short_remote_url(url)),
+            reference: None,
+        },
+        _ => DrawerItem {
+            display: line,
+            reference: None,
+        },
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Section {
     Staged,
@@ -89,16 +182,20 @@ enum Drawer {
     Branches,
     Worktrees,
     Remotes,
+    Stashes,
+    Tags,
 }
 
 impl Drawer {
-    const ALL: [Drawer; 6] = [
+    const ALL: [Drawer; 8] = [
         Drawer::Graph,
         Drawer::Commits,
         Drawer::FileHistory,
         Drawer::Branches,
         Drawer::Worktrees,
         Drawer::Remotes,
+        Drawer::Stashes,
+        Drawer::Tags,
     ];
 
     fn title(self) -> &'static str {
@@ -109,6 +206,8 @@ impl Drawer {
             Drawer::Branches => "Branches",
             Drawer::Worktrees => "Worktrees",
             Drawer::Remotes => "Remotes",
+            Drawer::Stashes => "Stashes",
+            Drawer::Tags => "Tags",
         }
     }
 
@@ -120,8 +219,16 @@ impl Drawer {
             Drawer::Branches => 3,
             Drawer::Worktrees => 4,
             Drawer::Remotes => 5,
+            Drawer::Stashes => 6,
+            Drawer::Tags => 7,
         }
     }
+}
+
+#[derive(Clone, Debug)]
+struct DrawerItem {
+    display: String,
+    reference: Option<String>,
 }
 
 /// A rendered row. Headers and files are both real selectable state nodes.
@@ -163,8 +270,8 @@ pub struct ScmView {
     flash: Option<(String, bool)>,
     staged_collapsed: bool,
     changes_collapsed: bool,
-    drawer_expanded: [bool; 6],
-    drawer_lines: [Vec<String>; 6],
+    drawer_expanded: [bool; 8],
+    drawer_lines: [Vec<DrawerItem>; 8],
     last_file_path: Option<String>,
     message: Vec<char>,
     cursor: usize,
@@ -194,7 +301,7 @@ impl ScmView {
             flash: None,
             staged_collapsed: false,
             changes_collapsed: false,
-            drawer_expanded: [false; 6],
+            drawer_expanded: [false; 8],
             drawer_lines: std::array::from_fn(|_| Vec::new()),
             last_file_path: None,
             message: Vec::new(),
@@ -234,6 +341,11 @@ impl ScmView {
             }
         } else {
             self.status = Status::default();
+        }
+        for drawer in Drawer::ALL {
+            if self.drawer_expanded[drawer.index()] {
+                self.load_drawer(drawer);
+            }
         }
         self.rebuild_rows();
         if let Some((staged, path)) = selected {
@@ -371,6 +483,15 @@ impl ScmView {
         }
     }
 
+    fn selected_drawer_item(&self) -> Option<(Drawer, &DrawerItem)> {
+        let Row::DrawerLine { drawer, index } = self.selected_row()? else {
+            return None;
+        };
+        self.drawer_lines[drawer.index()]
+            .get(*index)
+            .map(|item| (*drawer, item))
+    }
+
     fn select_header(&mut self, section: Section) {
         if let Some(index) = self.selectable.iter().position(|&row_idx| {
             matches!(
@@ -412,15 +533,28 @@ impl ScmView {
         self.scroll = self.scroll.min(max_scroll);
     }
 
+    fn remember_selected_file(&mut self) {
+        let path = self.selected_entry().map(|(_, entry)| entry.path.clone());
+        let Some(path) = path else {
+            return;
+        };
+        if self.last_file_path.as_deref() == Some(path.as_str()) {
+            return;
+        }
+        self.last_file_path = Some(path);
+        if self.drawer_expanded[Drawer::FileHistory.index()] {
+            self.load_drawer(Drawer::FileHistory);
+            self.rebuild_rows();
+        }
+    }
+
     fn move_sel(&mut self, delta: isize) {
         if self.selectable.is_empty() {
             return;
         }
         let n = self.selectable.len() as isize;
         self.selected = (self.selected as isize + delta).clamp(0, n - 1) as usize;
-        if let Some((_, entry)) = self.selected_entry() {
-            self.last_file_path = Some(entry.path.clone());
-        }
+        self.remember_selected_file();
         self.ensure_visible();
     }
 
@@ -491,9 +625,23 @@ impl ScmView {
             Drawer::Branches => git.branches(),
             Drawer::Worktrees => git.worktrees(),
             Drawer::Remotes => git.remotes(),
+            Drawer::Stashes => git.stashes(),
+            Drawer::Tags => git.tags(),
         };
         match result {
-            Ok(lines) => self.drawer_lines[drawer.index()] = lines,
+            Ok(lines) => {
+                self.drawer_lines[drawer.index()] = lines
+                    .into_iter()
+                    .map(|line| match drawer {
+                        Drawer::Graph => graph_drawer_item(line),
+                        Drawer::Commits | Drawer::FileHistory => log_drawer_item(line),
+                        Drawer::Branches => branch_drawer_item(line),
+                        Drawer::Worktrees => worktree_drawer_item(line),
+                        Drawer::Remotes => remote_drawer_item(line),
+                        Drawer::Stashes | Drawer::Tags => log_drawer_item(line),
+                    })
+                    .collect();
+            }
             Err(error) => {
                 self.drawer_lines[drawer.index()].clear();
                 self.flash = Some((error, true));
@@ -529,10 +677,10 @@ impl ScmView {
             self.set_drawer_expanded(drawer, expanded);
             return KeyOutcome::Handled;
         }
-        if matches!(self.selected_row(), Some(Row::File { .. })) {
-            self.toggle_stage()
-        } else {
-            KeyOutcome::Handled
+        match self.selected_row() {
+            Some(Row::File { .. }) => self.toggle_stage(),
+            Some(Row::DrawerLine { .. }) => self.open_drawer_ref(),
+            _ => KeyOutcome::Handled,
         }
     }
 
@@ -692,6 +840,50 @@ impl ScmView {
         }
     }
 
+    fn open_drawer_ref(&self) -> KeyOutcome {
+        let Some(git) = &self.git else {
+            return KeyOutcome::Handled;
+        };
+        let Some((drawer, item)) = self.selected_drawer_item() else {
+            return KeyOutcome::Handled;
+        };
+        let Some(reference) = &item.reference else {
+            return KeyOutcome::Handled;
+        };
+        let mut env = vec![("CORRAL_GIT_ROOT".into(), git.root().display().to_string())];
+        let (action, file) = match drawer {
+            Drawer::Graph | Drawer::Commits | Drawer::Branches | Drawer::Stashes | Drawer::Tags => {
+                env.push(("CORRAL_GIT_REF".into(), reference.clone()));
+                ("show_ref", git.root().to_path_buf())
+            }
+            Drawer::FileHistory => {
+                env.push(("CORRAL_GIT_REF".into(), reference.clone()));
+                if let Some(path) = &self.last_file_path {
+                    env.push(("CORRAL_GIT_PATH".into(), path.clone()));
+                }
+                ("show_ref", git.root().to_path_buf())
+            }
+            Drawer::Worktrees => {
+                env.push(("CORRAL_WORKTREE_PATH".into(), reference.clone()));
+                ("open_worktree", PathBuf::from(reference))
+            }
+            Drawer::Remotes => return KeyOutcome::Handled,
+        };
+        KeyOutcome::Shell {
+            action: action.into(),
+            file: Some(file),
+            env,
+        }
+    }
+
+    fn open_selected(&self) -> KeyOutcome {
+        if matches!(self.selected_row(), Some(Row::DrawerLine { .. })) {
+            self.open_drawer_ref()
+        } else {
+            self.open_diff()
+        }
+    }
+
     fn row_at_mouse(&self, row: u16) -> Option<usize> {
         let top = self.body_top.get();
         let height = self.body_height.get();
@@ -742,7 +934,7 @@ impl ScmView {
             }
             a if a == config::internal::TOGGLE => self.toggle_selected(),
             a if a == config::internal::OPEN || a == config::internal::SCM_OPEN_DIFF => {
-                self.open_diff()
+                self.open_selected()
             }
             a if a == config::internal::EXPAND => self.expand_selected(),
             a if a == config::internal::COLLAPSE => self.collapse_selected(),
@@ -1086,9 +1278,9 @@ impl FeatureView for ScmView {
                                 .fg(palette.text)
                                 .add_modifier(Modifier::DIM)
                         };
-                        if let Some(line) = self.drawer_lines[drawer.index()].get(*index) {
+                        if let Some(item) = self.drawer_lines[drawer.index()].get(*index) {
                             frame.render_widget(
-                                Paragraph::new(format!("    {line}")).style(style),
+                                Paragraph::new(format!("    {}", item.display)).style(style),
                                 rect,
                             );
                         }
@@ -1177,9 +1369,10 @@ impl FeatureView for ScmView {
                     self.selected = idx;
                     self.toggle_selected()
                 } else if self.selected == idx {
-                    self.open_diff()
+                    self.open_selected()
                 } else {
                     self.selected = idx;
+                    self.remember_selected_file();
                     self.ensure_visible();
                     KeyOutcome::Handled
                 }
@@ -1253,6 +1446,32 @@ mod tests {
             ("cli.rs", Some("src/herdr"))
         );
         assert_eq!(display_path_parts("Cargo.toml"), ("Cargo.toml", None));
+    }
+
+    #[test]
+    fn drawer_lines_keep_actionable_references() {
+        let history = log_drawer_item("abc1234\tfix history".into());
+        assert_eq!(history.display, "abc1234 fix history");
+        assert_eq!(history.reference.as_deref(), Some("abc1234"));
+
+        let graph = graph_drawer_item("* abc1234 (HEAD -> main) subject".into());
+        assert_eq!(graph.reference.as_deref(), Some("abc1234"));
+
+        let branch = branch_drawer_item("*\tmain".into());
+        assert_eq!(branch.display, "* main");
+        assert_eq!(branch.reference.as_deref(), Some("main"));
+
+        let worktree = worktree_drawer_item("/tmp/my tree\tfeature".into());
+        assert_eq!(worktree.reference.as_deref(), Some("/tmp/my tree"));
+
+        let remote = remote_drawer_item("origin\tgit@github.com:example/repo.git".into());
+        assert_eq!(remote.display, "origin  example/repo");
+        assert_eq!(remote.reference, None);
+        assert_eq!(
+            short_remote_url("https://github.com/example/repo.git"),
+            "example/repo"
+        );
+        assert_eq!(short_remote_url("/srv/git/repo.git"), "repo");
     }
 
     #[test]
