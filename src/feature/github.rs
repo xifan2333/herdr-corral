@@ -135,7 +135,6 @@ enum Payload {
     Workflows(Vec<Workflow>),
     WorkflowYaml {
         workflow: String,
-        display: String,
         r#ref: String,
         yaml: String,
     },
@@ -159,6 +158,7 @@ struct Completion {
     result: Result<Payload, String>,
 }
 
+#[derive(Debug)]
 struct PendingDispatch {
     workflow: String,
     r#ref: String,
@@ -171,11 +171,11 @@ struct DispatchField {
     value: String,
 }
 
+#[derive(Debug)]
 enum DispatchMode {
     Confirm(PendingDispatch),
     Form {
         workflow: String,
-        display: String,
         r#ref: String,
         fields: Vec<DispatchField>,
         selected: usize,
@@ -427,7 +427,6 @@ impl GitHubView {
             }
             Ok(Payload::WorkflowYaml {
                 workflow,
-                display,
                 r#ref,
                 yaml,
             }) => {
@@ -442,21 +441,26 @@ impl GitHubView {
                         inputs: Vec::new(),
                     }));
                 } else {
-                    let fields = inputs
+                    let fields: Vec<DispatchField> = inputs
                         .into_iter()
                         .map(|input| DispatchField {
                             value: input.default.clone(),
                             input,
                         })
                         .collect();
+                    // Start typing the first parameter immediately so the footer
+                    // can stay as a compact `key=` line without extra chrome.
+                    let edit = fields
+                        .first()
+                        .map(|field| field.value.chars().collect())
+                        .unwrap_or_default();
                     self.dispatch_mode = Some(DispatchMode::Form {
                         workflow,
-                        display,
                         r#ref,
                         fields,
                         selected: 0,
-                        editing: false,
-                        edit: Vec::new(),
+                        editing: true,
+                        edit,
                     });
                 }
             }
@@ -876,13 +880,11 @@ impl GitHubView {
         let generation = self.generation;
         let adapter = Arc::clone(&self.adapter);
         let sender = self.sender.clone();
-        let display = workflow.name.clone();
         std::thread::spawn(move || {
             let result = adapter
                 .workflow_yaml(&repo, &workflow_id, &r#ref)
                 .map(|yaml| Payload::WorkflowYaml {
                     workflow: workflow_id,
-                    display,
                     r#ref,
                     yaml,
                 });
@@ -931,12 +933,19 @@ impl GitHubView {
             workflow,
             r#ref,
             fields,
+            selected,
+            edit,
             ..
         }) = &self.dispatch_mode
         else {
             return KeyOutcome::Handled;
         };
-        for field in fields {
+        // Persist the last typed field before validation/dispatch.
+        let mut fields = fields.clone();
+        if let Some(field) = fields.get_mut(*selected) {
+            field.value = edit.iter().collect::<String>().trim().to_string();
+        }
+        for field in &fields {
             if field.input.required && field.value.trim().is_empty() {
                 self.set_notice(format!("{} is required", field.input.name), true);
                 return KeyOutcome::Handled;
@@ -950,8 +959,9 @@ impl GitHubView {
                 .map(|field| (field.input.name.clone(), field.value.clone()))
                 .collect(),
         };
+        // Last Enter on the final field dispatches immediately.
         self.dispatch_mode = Some(DispatchMode::Confirm(pending));
-        KeyOutcome::Handled
+        self.confirm_dispatch()
     }
 
     fn cancel_pending(&mut self) -> KeyOutcome {
@@ -981,56 +991,77 @@ impl GitHubView {
                 edit,
                 ..
             }) => {
-                if *editing {
-                    match action.as_deref() {
-                        Some(config::internal::GITHUB_FILTER_CANCEL) => {
-                            *editing = false;
-                            edit.clear();
-                        }
-                        Some(
-                            config::internal::TOGGLE
-                            | config::internal::OPEN
-                            | config::internal::GITHUB_VIEW
-                            | config::internal::GITHUB_CONFIRM,
-                        ) => {
-                            if let Some(field) = fields.get_mut(*selected) {
-                                field.value = edit.iter().collect();
-                            }
-                            *editing = false;
-                            edit.clear();
-                        }
-                        Some(config::internal::EDIT_BACKSPACE) => {
-                            edit.pop();
-                        }
-                        _ => {
-                            if let KeyCode::Char(ch) = code {
-                                if !mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
-                                    edit.push(ch);
-                                }
-                            }
-                        }
+                // Sequential parameter collection: the form stays in edit mode
+                // and only shows `key=value`. Enter advances; after the last
+                // field it dispatches immediately.
+                if let KeyCode::Char(ch) = code {
+                    if !mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+                        *editing = true;
+                        edit.push(ch);
+                        return KeyOutcome::Handled;
                     }
-                    return KeyOutcome::Handled;
                 }
                 match action.as_deref() {
-                    Some(config::internal::UP) => {
-                        *selected = selected.saturating_sub(1);
+                    Some(config::internal::GITHUB_FILTER_CANCEL)
+                        if !matches!(code, KeyCode::Char(_)) =>
+                    {
+                        return self.cancel_pending();
                     }
-                    Some(config::internal::DOWN) => {
-                        *selected = (*selected + 1).min(fields.len().saturating_sub(1));
+                    Some(config::internal::EDIT_BACKSPACE) => {
+                        *editing = true;
+                        edit.pop();
                     }
                     Some(
                         config::internal::TOGGLE
                         | config::internal::OPEN
-                        | config::internal::GITHUB_VIEW,
-                    ) => {
-                        if let Some(field) = fields.get(*selected) {
-                            *edit = field.value.chars().collect();
+                        | config::internal::GITHUB_VIEW
+                        | config::internal::GITHUB_CONFIRM,
+                    ) if !matches!(code, KeyCode::Char(_)) => {
+                        let required_empty = if let Some(field) = fields.get_mut(*selected) {
+                            field.value = edit.iter().collect::<String>().trim().to_string();
+                            field.input.required && field.value.is_empty()
+                        } else {
+                            false
+                        };
+                        if required_empty {
+                            let name = fields
+                                .get(*selected)
+                                .map(|field| field.input.name.clone())
+                                .unwrap_or_else(|| "input".into());
+                            self.set_notice(format!("{name} is required"), true);
+                            return KeyOutcome::Handled;
+                        }
+                        if *selected + 1 < fields.len() {
+                            *selected += 1;
+                            *edit = fields
+                                .get(*selected)
+                                .map(|field| field.value.chars().collect())
+                                .unwrap_or_default();
                             *editing = true;
+                        } else {
+                            return self.submit_dispatch_form();
                         }
                     }
-                    Some(config::internal::GITHUB_CONFIRM) => return self.submit_dispatch_form(),
-                    Some(config::internal::GITHUB_FILTER_CANCEL) => return self.cancel_pending(),
+                    Some(config::internal::UP)
+                        if (!*editing || edit.is_empty()) && *selected > 0 =>
+                    {
+                        *selected -= 1;
+                        *edit = fields
+                            .get(*selected)
+                            .map(|field| field.value.chars().collect())
+                            .unwrap_or_default();
+                        *editing = true;
+                    }
+                    Some(config::internal::DOWN)
+                        if (!*editing || edit.is_empty()) && *selected + 1 < fields.len() =>
+                    {
+                        *selected += 1;
+                        *edit = fields
+                            .get(*selected)
+                            .map(|field| field.value.chars().collect())
+                            .unwrap_or_default();
+                        *editing = true;
+                    }
                     _ => {}
                 }
                 KeyOutcome::Handled
@@ -1452,24 +1483,16 @@ impl FeatureView for GitHubView {
                         )
                     }
                     DispatchMode::Form {
-                        display,
                         fields,
                         selected,
-                        editing,
                         edit,
                         ..
                     } => {
                         let field = fields.get(*selected);
                         let name = field.map(|f| f.input.name.as_str()).unwrap_or("input");
-                        let value = if *editing {
-                            format!("{}│", edit.iter().collect::<String>())
-                        } else {
-                            field.map(|f| f.value.as_str()).unwrap_or("").to_string()
-                        };
+                        let value = edit.iter().collect::<String>();
                         (
-                            format!(
-                                " {display}: {name}={value}  Enter edit  y dispatch  Esc cancel"
-                            ),
+                            format!(" {name}={value}│"),
                             Style::default().fg(palette.text).bg(palette.surface0),
                         )
                     }
@@ -1881,6 +1904,96 @@ mod tests {
     }
 
     #[test]
+    fn workflow_input_editing_keeps_plain_characters() {
+        let mut view = view();
+        view.dispatch_mode = Some(DispatchMode::Form {
+            workflow: ".github/workflows/ci.yml".into(),
+            r#ref: "main".into(),
+            fields: vec![DispatchField {
+                input: WorkflowInput {
+                    name: "tag_name".into(),
+                    description: String::new(),
+                    required: true,
+                    input_type: "string".into(),
+                    default: String::new(),
+                    options: Vec::new(),
+                },
+                value: String::new(),
+            }],
+            selected: 0,
+            editing: true,
+            edit: "fcitx-vi".chars().collect(),
+        });
+        // `n` is bound to cancel in browse mode, but must type while editing.
+        view.on_dispatch_key(KeyCode::Char('n'), KeyModifiers::NONE);
+        view.on_dispatch_key(KeyCode::Char('p'), KeyModifiers::NONE);
+        view.on_dispatch_key(KeyCode::Char('u'), KeyModifiers::NONE);
+        view.on_dispatch_key(KeyCode::Char('t'), KeyModifiers::NONE);
+        match view.dispatch_mode.as_ref() {
+            Some(DispatchMode::Form { edit, editing, .. }) => {
+                assert!(*editing);
+                assert_eq!(edit.iter().collect::<String>(), "fcitx-vinput");
+            }
+            other => panic!("expected form editing mode, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn workflow_form_enter_advances_and_last_enter_dispatches() {
+        let mut view = view();
+        view.repo = Some(repo());
+        view.dispatch_mode = Some(DispatchMode::Form {
+            workflow: ".github/workflows/deploy.yml".into(),
+            r#ref: "main".into(),
+            fields: vec![
+                DispatchField {
+                    input: WorkflowInput {
+                        name: "tag_name".into(),
+                        description: String::new(),
+                        required: true,
+                        input_type: "string".into(),
+                        default: String::new(),
+                        options: Vec::new(),
+                    },
+                    value: String::new(),
+                },
+                DispatchField {
+                    input: WorkflowInput {
+                        name: "dry_run".into(),
+                        description: String::new(),
+                        required: false,
+                        input_type: "boolean".into(),
+                        default: "true".into(),
+                        options: Vec::new(),
+                    },
+                    value: "true".into(),
+                },
+            ],
+            selected: 0,
+            editing: true,
+            edit: "v1.2.3".chars().collect(),
+        });
+        view.on_dispatch_key(KeyCode::Enter, KeyModifiers::NONE);
+        match view.dispatch_mode.as_ref() {
+            Some(DispatchMode::Form {
+                selected,
+                edit,
+                fields,
+                ..
+            }) => {
+                assert_eq!(*selected, 1);
+                assert_eq!(fields[0].value, "v1.2.3");
+                assert_eq!(edit.iter().collect::<String>(), "true");
+            }
+            other => panic!("expected next field, got {other:?}"),
+        }
+        view.on_dispatch_key(KeyCode::Enter, KeyModifiers::NONE);
+        // Last Enter should leave form mode and kick off dispatch.
+        assert!(view.dispatch_mode.is_none());
+        assert!(view.dispatching);
+    }
+
+    #[test]
     fn workflow_dispatch_opens_confirm_or_form_after_yaml_load() {
         let mut view = view();
         view.repo = Some(repo());
@@ -1899,7 +2012,6 @@ mod tests {
             target: LoadTarget::WorkflowYaml,
             result: Ok(Payload::WorkflowYaml {
                 workflow: ".github/workflows/ci.yml".into(),
-                display: "CI".into(),
                 r#ref: "main".into(),
                 yaml: "on:\n  workflow_dispatch:\n".into(),
             }),
@@ -1920,8 +2032,7 @@ mod tests {
             target: LoadTarget::WorkflowYaml,
             result: Ok(Payload::WorkflowYaml {
                 workflow: ".github/workflows/deploy.yml".into(),
-                display: "Deploy".into(),
-                r#ref: "main".into(),
+                    r#ref: "main".into(),
                 yaml: "on:\n  workflow_dispatch:\n    inputs:\n      tag_name:\n        required: true\n        type: string\n".into(),
             }),
         });
