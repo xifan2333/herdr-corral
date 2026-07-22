@@ -19,6 +19,7 @@ pub mod config;
 pub mod diffview;
 pub mod feature;
 pub mod git;
+pub mod github;
 pub mod herdr;
 pub mod host;
 pub mod ui;

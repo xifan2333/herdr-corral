@@ -15,7 +15,7 @@ VS Code 风格的**左侧边栏**（Rust）。**开发中**。
 - **一个** left-docked Herdr pane（重复打开只聚焦现有 pane）
 - 启动时选择真正最左 pane，按约 32 列计算 split ratio
 - 顶栏横排 feature icons：Explorer / SCM / GitHub（进程内切换）
-- 文件和 SCM diff 复用一个 owner-scoped nvim pane，通过 RPC 切换 buffer
+- 文件、SCM diff 和 GitHub 长内容复用一个 owner-scoped nvim pane，通过 RPC 切换 buffer
 - 也可 standalone：`./target/release/corral`
 
 ## 开发
@@ -61,6 +61,14 @@ SCM 默认使用 `corral-diff`；可在 `config.sh` 设置
 也可将 `CORRAL_COMMIT_SUGGEST_CMD` 替换为其他 agent 或自定义脚本。命令
 接收包含 label 规则、文件列表和 diff 的消息参数，并从 stdout 返回一行 subject。
 
+GitHub：依赖已登录的 [GitHub CLI](https://cli.github.com/) `gh`，不在 Corral
+内保存 token。Issues、Pull Requests、Actions 与 SCM 一样是可选择、可折叠的
+状态树 section，`i`/`p`/`a` 定位 section，`Enter` 或 `h`/`l` 折叠展开。
+条目使用 `Enter`/`o` 查看，PR 使用 `d` 查看 diff、`c` 查看 checks，Actions
+使用 `x`/`L` 查看失败/完整日志；`f` 本地过滤，`]` 加载更多，`s` 循环
+open/closed/merged/all 状态。网络请求全部在后台执行，进行中的 Actions 每 5 秒
+刷新。GitHub Enterprise 使用 `[HOST/]OWNER/REPO` selector。
+
 ## 模块
 
 | 模块 | 作用 |
@@ -70,14 +78,15 @@ SCM 默认使用 `corral-diff`；可在 `config.sh` 设置
 | `icons` | Nerd Font 检测 |
 | `feature` | Explorer / SCM / GitHub |
 | `git` | 仓库发现、status 解析、stage / unstage |
+| `github` | `gh` adapter、仓库身份和 typed models |
 | `diffview` / `corral-diff` | 独立主题化 diff 过滤器 |
 | `layout` | activity + body 几何 |
 | `app` | sidebar 事件循环 |
 
 ## 下一步
 
-1. `config.sh` 版本迁移执行器与 editor pane/socket 回收
-2. Explorer Change Folder
-3. SCM drawer destructive-action confirmation
-4. 自动 ensure / toggle
-5. GitHub 独立 adapter + view
+1. GitHub 回复、Approve/Request Changes、Close/Reopen 和安全 Merge
+2. GitHub Actions Cancel/Rerun 与 Workflow Dispatch
+3. `config.sh` 版本迁移执行器与 editor pane/socket 回收
+4. Explorer Change Folder
+5. SCM drawer destructive-action confirmation与自动 ensure / toggle

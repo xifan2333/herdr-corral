@@ -10,8 +10,8 @@ platforms = ["linux", "macos"]
 [[build]]
 command = ["cargo", "build", "--release"]
 
-# Left-docked sidebar pane. Feature switching is in-process.
-# File/diff/PR preview will be a separate pane later (not drawn here).
+# Left-docked sidebar pane. Feature switching is in-process; file, diff, and
+# GitHub previews reuse one owner-scoped nvim pane managed by config.sh.
 [[panes]]
 id = "sidebar"
 title = "Sidebar"

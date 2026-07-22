@@ -5,7 +5,7 @@
 #   standalone: ${XDG_CONFIG_HOME:-~/.config}/corral/config.sh
 # Edit THAT file — no recompile needed. Future migrations use this in-place
 # version and preserve customized bindings/functions.
-CORRAL_CONFIG_VERSION=5
+CORRAL_CONFIG_VERSION=7
 #
 # River-style: call `corral bind <key> <action>` (like `riverctl map …`).
 #   global actions: quit feature-explorer feature-scm feature-github
@@ -15,6 +15,9 @@ CORRAL_CONFIG_VERSION=5
 #   SCM actions:    scm-toggle-stage scm-stage-all scm-unstage-all scm-open-diff
 #                   scm-focus-message scm-suggest-message scm-discard
 #                   scm-confirm scm-cancel scm-sync
+#   GitHub:         github-issues github-pulls github-actions github-view
+#                   github-diff github-checks github-log github-log-failed
+#                   github-filter github-load-more github-cycle-state
 #   text editing:   edit-backspace edit-delete edit-home edit-end
 #   any other action = a shell function of that name (defined below)
 #
@@ -61,6 +64,23 @@ corral bind n scm-cancel
 corral bind esc scm-cancel
 corral bind S scm-sync
 corral bind A scm-suggest-message
+
+corral bind github:i github-issues
+corral bind github:p github-pulls
+corral bind github:a github-actions
+corral bind github:enter github-view
+corral bind github:o github-view
+corral bind github:d github-diff
+corral bind github:c github-checks
+corral bind github:x github-log-failed
+corral bind github:L github-log
+corral bind github:f github-filter
+corral bind github:] github-load-more
+corral bind github:s github-cycle-state
+corral bind github:tab github-next-section
+corral bind github:backtab github-prev-section
+corral bind github:esc github-filter-cancel
+
 corral bind backspace edit-backspace
 corral bind delete edit-delete
 corral bind home edit-home
@@ -110,9 +130,22 @@ _corral_nvim_ready() {
   [[ "$("$nvim" --server "$socket" --remote-expr '1' 2>/dev/null || true)" == 1 ]]
 }
 
+_corral_restore_sidebar_width() {
+  local herdr=$1 owner=$2 corral_bin plan direction amount
+  corral_bin=$(command -v corral 2>/dev/null || true)
+  [[ -n "$corral_bin" ]] || return 0
+  plan="$("$herdr" pane layout --pane "$owner" 2>/dev/null \
+    | "$corral_bin" --resize-plan "$owner" 2>/dev/null || true)"
+  [[ -n "$plan" ]] || return 0
+  IFS=$'\t' read -r direction amount <<<"$plan"
+  "$herdr" pane resize --pane "$owner" --direction "$direction" --amount "$amount" \
+    >/dev/null 2>&1
+}
+
 # Ensure one owner-scoped nvim RPC instance and echo "pane<TAB>socket<TAB>nvim".
 _corral_ensure_nvim() {
   local herdr="$HERDR_BIN_PATH" owner="${HERDR_PANE_ID:-}" editor nvim socket pid out cmd
+  local neighbor split_target swap_target
   _corral_valid_pane_id "$owner" || return 1
   editor="${CORRAL_EDITOR:-${EDITOR:-${VISUAL:-nvim}}}"
   nvim="$(command -v "${editor%% *}" 2>/dev/null || true)"
@@ -135,7 +168,17 @@ _corral_ensure_nvim() {
   fi
 
   rm -f -- "$socket"
-  out="$("$herdr" pane split "$owner" --direction right --focus --ratio 0.75 2>&1)" || return 1
+  # Splitting the 32-column sidebar itself would shrink Corral and leave an
+  # unreadable 8-column editor. Instead split its immediate right neighbor,
+  # then swap the new owned pane into the wide left slot of that editor area.
+  split_target="$owner"; swap_target=""
+  neighbor="$("$herdr" pane neighbor --direction right --pane "$owner" 2>/dev/null \
+    | jq -r '.result.neighbor.neighbor_pane_id // empty' 2>/dev/null || true)"
+  if _corral_valid_pane_id "$neighbor" && [[ "$neighbor" != "$owner" ]]; then
+    split_target="$neighbor"
+    swap_target="$neighbor"
+  fi
+  out="$("$herdr" pane split "$split_target" --direction right --focus --ratio 0.75 2>&1)" || return 1
   pid="$(printf '%s' "$out" | jq -r '.result.pane.pane_id // empty' 2>/dev/null || true)"
   _corral_valid_pane_id "$pid" || return 1
   if ! "$herdr" pane report-metadata "$pid" --source corral-editor \
@@ -149,6 +192,15 @@ _corral_ensure_nvim() {
     "$herdr" pane close "$pid" >/dev/null 2>&1 || true
     return 1
   fi
+  if [[ -n "$swap_target" ]] \
+    && ! "$herdr" pane swap --source-pane "$pid" --target-pane "$swap_target" >/dev/null 2>&1; then
+    "$herdr" pane close "$pid" >/dev/null 2>&1 || true
+    return 1
+  fi
+  _corral_restore_sidebar_width "$herdr" "$owner" || {
+    "$herdr" pane close "$pid" >/dev/null 2>&1 || true
+    return 1
+  }
   for _ in $(seq 1 40); do
     if _corral_nvim_ready "$herdr" "$pid" "$socket" "$nvim"; then
       printf '%s\t%s\t%s' "$pid" "$socket" "$nvim"
@@ -390,6 +442,65 @@ open_worktree() {
   [[ -n "$path" && -d "$path" ]] || return 1
   open "$path"
 }
+
+# CORRAL_MIGRATION_V6_FUNCTION_BEGIN
+# GitHub's long-form views share the owner-scoped nvim pane with Explorer and
+# SCM. Identifiers arrive as structured env, are validated, and are shell-quoted
+# before entering the private preview script.
+github_preview() {
+  local kind="${CORRAL_GITHUB_KIND:-}" repo="${CORRAL_GITHUB_REPO:-}"
+  local number="${CORRAL_GITHUB_NUMBER:-}" run_id="${CORRAL_GITHUB_RUN_ID:-}"
+  local gh_bin renderer qgh qrepo cmd
+  [[ -n "$repo" ]] || return 1
+  gh_bin=$(command -v gh 2>/dev/null || true)
+  [[ -n "$gh_bin" ]] || { printf 'corral: GitHub CLI (gh) not found\n' >&2; return 1; }
+  qgh=$(printf '%q' "$gh_bin"); qrepo=$(printf '%q' "$repo")
+  case "$kind" in
+    issue)
+      [[ "$number" =~ ^[0-9]+$ ]] || return 1
+      printf -v cmd 'GH_PROMPT_DISABLED=1 GH_PAGER=cat %s issue view %s --repo %s --comments | less -R' "$qgh" "$number" "$qrepo"
+      ;;
+    pr)
+      [[ "$number" =~ ^[0-9]+$ ]] || return 1
+      printf -v cmd 'GH_PROMPT_DISABLED=1 GH_PAGER=cat %s pr view %s --repo %s --comments | less -R' "$qgh" "$number" "$qrepo"
+      ;;
+    diff)
+      [[ "$number" =~ ^[0-9]+$ ]] || return 1
+      renderer=$(command -v corral-diff 2>/dev/null || true)
+      if [[ -n "$renderer" ]]; then
+        printf -v cmd 'GH_PROMPT_DISABLED=1 GH_PAGER=cat %s pr diff %s --repo %s | %q | less -R' "$qgh" "$number" "$qrepo" "$renderer"
+      else
+        printf -v cmd 'GH_PROMPT_DISABLED=1 GH_PAGER=cat %s pr diff %s --repo %s | less -R' "$qgh" "$number" "$qrepo"
+      fi
+      ;;
+    checks)
+      [[ "$number" =~ ^[0-9]+$ ]] || return 1
+      # gh uses exit 8 for pending checks; it is a valid preview state.
+      printf -v cmd '{ GH_PROMPT_DISABLED=1 GH_PAGER=cat %s pr checks %s --repo %s; code=$?; (( code == 0 || code == 8 )); } | less -R' "$qgh" "$number" "$qrepo"
+      ;;
+    run)
+      [[ "$run_id" =~ ^[0-9]+$ ]] || return 1
+      printf -v cmd 'GH_PROMPT_DISABLED=1 GH_PAGER=cat %s run view %s --repo %s | less -R' "$qgh" "$run_id" "$qrepo"
+      ;;
+    log)
+      [[ "$run_id" =~ ^[0-9]+$ ]] || return 1
+      printf -v cmd 'GH_PROMPT_DISABLED=1 GH_PAGER=cat %s run view %s --repo %s --log | less -R' "$qgh" "$run_id" "$qrepo"
+      ;;
+    log-failed)
+      [[ "$run_id" =~ ^[0-9]+$ ]] || return 1
+      printf -v cmd 'GH_PROMPT_DISABLED=1 GH_PAGER=cat %s run view %s --repo %s --log-failed | less -R' "$qgh" "$run_id" "$qrepo"
+      ;;
+    *) return 1 ;;
+  esac
+  if [[ -n "${HERDR_BIN_PATH:-}" && -n "${HERDR_ENV:-}" ]]; then
+    echo CORRAL_SUSPEND=0
+    _corral_run "$cmd"
+  else
+    echo CORRAL_SUSPEND=1
+    eval "$cmd"
+  fi
+}
+# CORRAL_MIGRATION_V6_FUNCTION_END
 
 # Optional intelligent commit-message provider. Corral appends one prompt
 # argument containing instructions, changed files, and the bounded Git diff.

@@ -6,6 +6,17 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
+fn editor_creation_uses_the_right_area_and_restores_sidebar_width() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let config = fs::read_to_string(root.join("config.default.sh")).unwrap();
+    assert!(config.contains("pane neighbor --direction right --pane \"$owner\""));
+    assert!(config.contains("pane split \"$split_target\""));
+    assert!(config.contains("pane swap --source-pane \"$pid\" --target-pane \"$swap_target\""));
+    assert!(config.contains("_corral_restore_sidebar_width \"$herdr\" \"$owner\""));
+    assert!(!config.contains("pane split \"$owner\" --direction right"));
+}
+
+#[test]
 fn diff_reuses_owned_nvim_via_rpc_without_terminal_input_injection() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let temp = std::env::temp_dir().join(format!(
@@ -24,6 +35,7 @@ fn diff_reuses_owned_nvim_via_rpc_without_terminal_input_injection() {
     let herdr = temp.join("herdr");
     let nvim = temp.join("nvim");
     let corral = temp.join("corral");
+    let gh = temp.join("gh");
     let herdr_log = temp.join("herdr.log");
     let nvim_log = temp.join("nvim.log");
 
@@ -48,7 +60,8 @@ exit 0
     )
     .unwrap();
     fs::write(&corral, "#!/usr/bin/env bash\nexit 0\n").unwrap();
-    for path in [&herdr, &nvim, &corral] {
+    fs::write(&gh, "#!/usr/bin/env bash\nexit 0\n").unwrap();
+    for path in [&herdr, &nvim, &corral, &gh] {
         let mut permissions = fs::metadata(path).unwrap().permissions();
         permissions.set_mode(0o755);
         fs::set_permissions(path, permissions).unwrap();
@@ -57,7 +70,7 @@ exit 0
     let path = format!("{}:/usr/bin:/bin", temp.display());
     let status = Command::new("bash")
         .arg("-c")
-        .arg("source \"$1\"; _corral_run 'printf preview-ok'")
+        .arg("source \"$1\"; _corral_run 'printf preview-ok'; CORRAL_GITHUB_KIND=issue CORRAL_GITHUB_REPO=owner/repo CORRAL_GITHUB_NUMBER=42 github_preview")
         .arg("--")
         .arg(root.join("config.default.sh"))
         .env("PATH", path)
@@ -86,6 +99,17 @@ exit 0
     assert!(nvim_calls.contains("signcolumn=no"));
     assert!(nvim_calls.contains("foldcolumn=0"));
     assert!(nvim_calls.contains("terminal"));
+
+    let preview_scripts = fs::read_dir(&runtime)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with("preview."))
+        .map(|entry| fs::read_to_string(entry.path()).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(preview_scripts.contains("gh issue view 42 --repo owner/repo --comments"));
+    assert!(!preview_scripts.contains("send-text"));
+    assert!(!preview_scripts.contains("send-keys"));
 
     fs::remove_dir_all(temp).unwrap();
 }

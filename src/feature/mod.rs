@@ -5,7 +5,7 @@
 //! icons and digit shortcuts stay on the id enum.
 
 mod explorer;
-mod placeholder;
+mod github;
 mod scm;
 mod view;
 
@@ -13,7 +13,7 @@ pub use view::{FeatureView, KeyOutcome};
 
 use crate::config::Config;
 use explorer::ExplorerView;
-use placeholder::PlaceholderView;
+use github::GitHubView;
 use scm::ScmView;
 use std::sync::Arc;
 
@@ -91,15 +91,15 @@ impl Feature {
 pub struct Views {
     explorer: ExplorerView,
     scm: ScmView,
-    github: PlaceholderView,
+    github: GitHubView,
 }
 
 impl Views {
     pub fn new(cwd: &std::path::Path, nerd_font: bool, config: Arc<Config>) -> Self {
         Self {
             explorer: ExplorerView::new(cwd.to_path_buf(), nerd_font, Arc::clone(&config)),
-            scm: ScmView::new(cwd.to_path_buf(), nerd_font, config),
-            github: PlaceholderView::new(Feature::GitHub, "issues / PRs go here".into()),
+            scm: ScmView::new(cwd.to_path_buf(), nerd_font, Arc::clone(&config)),
+            github: GitHubView::new(cwd.to_path_buf(), config),
         }
     }
 

@@ -43,6 +43,21 @@ pub mod internal {
     pub const EXPLORER_CREATE: &str = "explorer-create";
     pub const EXPLORER_DELETE: &str = "explorer-delete";
     pub const EXPLORER_RENAME: &str = "explorer-rename";
+    pub const GITHUB_ISSUES: &str = "github-issues";
+    pub const GITHUB_PULLS: &str = "github-pulls";
+    pub const GITHUB_ACTIONS: &str = "github-actions";
+    pub const GITHUB_VIEW: &str = "github-view";
+    pub const GITHUB_DIFF: &str = "github-diff";
+    pub const GITHUB_CHECKS: &str = "github-checks";
+    pub const GITHUB_LOG: &str = "github-log";
+    pub const GITHUB_LOG_FAILED: &str = "github-log-failed";
+    pub const GITHUB_FILTER: &str = "github-filter";
+    pub const GITHUB_FILTER_APPLY: &str = "github-filter-apply";
+    pub const GITHUB_FILTER_CANCEL: &str = "github-filter-cancel";
+    pub const GITHUB_LOAD_MORE: &str = "github-load-more";
+    pub const GITHUB_CYCLE_STATE: &str = "github-cycle-state";
+    pub const GITHUB_NEXT_SECTION: &str = "github-next-section";
+    pub const GITHUB_PREV_SECTION: &str = "github-prev-section";
     pub const EDIT_BACKSPACE: &str = "edit-backspace";
     pub const EDIT_DELETE: &str = "edit-delete";
     pub const EDIT_HOME: &str = "edit-home";
@@ -78,22 +93,31 @@ impl Config {
     pub fn load() -> Self {
         let dir = config_dir();
         let path = dir.join("config.sh");
+        let default_path = shipped_default();
 
         // Seed the user config from the shipped default on first run, so it can
         // be edited on disk without recompiling Corral.
         if !path.exists() {
-            if let Some(def) = shipped_default() {
+            if let Some(def) = default_path.as_ref() {
                 let _ = std::fs::create_dir_all(&dir);
-                let _ = std::fs::copy(&def, &path);
+                let _ = std::fs::copy(def, &path);
             }
         }
 
         // Load user config; fall back to the shipped default file if the user
         // copy is still missing (e.g. seeding failed / read-only dir).
-        let source = std::fs::read_to_string(&path)
+        let default_source = default_path
+            .as_ref()
+            .and_then(|default| std::fs::read_to_string(default).ok());
+        let mut source = std::fs::read_to_string(&path)
             .ok()
-            .or_else(|| shipped_default().and_then(|d| std::fs::read_to_string(d).ok()))
+            .or_else(|| default_source.clone())
             .unwrap_or_default();
+        if path.is_file() {
+            if let Some(default) = default_source.as_deref() {
+                source = migrate_config(&path, &source, default);
+            }
+        }
 
         // River-style: run the config once in register mode; `corral bind …`
         // calls record key→action. Fall back to built-in nav binds on failure.
@@ -163,6 +187,21 @@ impl Config {
                 | internal::EXPLORER_CREATE
                 | internal::EXPLORER_DELETE
                 | internal::EXPLORER_RENAME
+                | internal::GITHUB_ISSUES
+                | internal::GITHUB_PULLS
+                | internal::GITHUB_ACTIONS
+                | internal::GITHUB_VIEW
+                | internal::GITHUB_DIFF
+                | internal::GITHUB_CHECKS
+                | internal::GITHUB_LOG
+                | internal::GITHUB_LOG_FAILED
+                | internal::GITHUB_FILTER
+                | internal::GITHUB_FILTER_APPLY
+                | internal::GITHUB_FILTER_CANCEL
+                | internal::GITHUB_LOAD_MORE
+                | internal::GITHUB_CYCLE_STATE
+                | internal::GITHUB_NEXT_SECTION
+                | internal::GITHUB_PREV_SECTION
                 | internal::EDIT_BACKSPACE
                 | internal::EDIT_DELETE
                 | internal::EDIT_HOME
@@ -386,6 +425,159 @@ fn is_safe_fn_name(name: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+const GITHUB_CONFIG_VERSION: u32 = 7;
+const GITHUB_FUNCTION_BEGIN: &str = "# CORRAL_MIGRATION_V6_FUNCTION_BEGIN";
+const GITHUB_FUNCTION_END: &str = "# CORRAL_MIGRATION_V6_FUNCTION_END";
+const GITHUB_DEFAULT_BINDS: [(&str, &str); 15] = [
+    ("github:i", internal::GITHUB_ISSUES),
+    ("github:p", internal::GITHUB_PULLS),
+    ("github:a", internal::GITHUB_ACTIONS),
+    ("github:enter", internal::GITHUB_VIEW),
+    ("github:o", internal::GITHUB_VIEW),
+    ("github:d", internal::GITHUB_DIFF),
+    ("github:c", internal::GITHUB_CHECKS),
+    ("github:x", internal::GITHUB_LOG_FAILED),
+    ("github:L", internal::GITHUB_LOG),
+    ("github:f", internal::GITHUB_FILTER),
+    ("github:]", internal::GITHUB_LOAD_MORE),
+    ("github:s", internal::GITHUB_CYCLE_STATE),
+    ("github:tab", internal::GITHUB_NEXT_SECTION),
+    ("github:backtab", internal::GITHUB_PREV_SECTION),
+    ("github:esc", internal::GITHUB_FILTER_CANCEL),
+];
+
+fn config_version(source: &str) -> u32 {
+    source
+        .lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("CORRAL_CONFIG_VERSION=")
+                .and_then(|value| value.trim_matches(['\'', '"']).parse().ok())
+        })
+        .unwrap_or(0)
+}
+
+fn marked_block<'a>(source: &'a str, begin: &str, end: &str) -> Option<&'a str> {
+    let start = source.find(begin)?;
+    let tail = &source[start..];
+    let finish = tail.find(end)?.saturating_add(end.len());
+    Some(&tail[..finish])
+}
+
+fn textual_binds(source: &str) -> HashMap<String, String> {
+    source
+        .lines()
+        .filter_map(|line| {
+            let mut words = line.split_whitespace();
+            if words.next()? != "corral" || words.next()? != "bind" {
+                return None;
+            }
+            let key = words.next()?;
+            let action = words.next()?;
+            Some((normalize_binding_key(key), action.to_string()))
+        })
+        .collect()
+}
+
+fn remove_stock_binding(source: &str, key: &str, action: &str) -> String {
+    source
+        .lines()
+        .filter(|line| {
+            let mut words = line.split_whitespace();
+            !(words.next() == Some("corral")
+                && words.next() == Some("bind")
+                && words.next() == Some(key)
+                && words.next() == Some(action))
+        })
+        .fold(String::new(), |mut output, line| {
+            output.push_str(line);
+            output.push('\n');
+            output
+        })
+}
+
+fn declares_function(source: &str, name: &str) -> bool {
+    source.lines().any(|line| {
+        let line = line.trim_start();
+        line.starts_with(&format!("{name}()")) || line.starts_with(&format!("function {name}"))
+    })
+}
+
+fn set_config_version(source: &str, version: u32) -> String {
+    let mut replaced = false;
+    let mut output = String::new();
+    for line in source.lines() {
+        if line.trim_start().starts_with("CORRAL_CONFIG_VERSION=") {
+            output.push_str(&format!("CORRAL_CONFIG_VERSION={version}\n"));
+            replaced = true;
+        } else {
+            output.push_str(line);
+            output.push('\n');
+        }
+    }
+    if !replaced {
+        output.insert_str(0, &format!("CORRAL_CONFIG_VERSION={version}\n"));
+    }
+    output
+}
+
+/// Apply one known migration without replacing user bindings or functions.
+/// A backup is retained beside the config; failure to persist still uses the
+/// migrated source for this process so an old read-only config degrades safely.
+fn migrate_config(path: &Path, source: &str, default: &str) -> String {
+    if config_version(source) >= GITHUB_CONFIG_VERSION
+        || config_version(default) < GITHUB_CONFIG_VERSION
+    {
+        return source.to_string();
+    }
+
+    // v6 used `github:l` for failed logs, shadowing the tree's standard expand
+    // key. Remove only that exact stock binding; custom `github:l` actions stay.
+    let declared = textual_binds(source);
+    let source =
+        if declared.get("github:l").map(String::as_str) == Some(internal::GITHUB_LOG_FAILED) {
+            remove_stock_binding(source, "github:l", internal::GITHUB_LOG_FAILED)
+        } else {
+            source.to_string()
+        };
+    let mut existing = collect_binds(&source);
+    // Preserve declarative binds even when migration runs in an install/test
+    // context where the `corral bind` helper is temporarily unavailable.
+    existing.extend(textual_binds(&source));
+    let mut migrated = source.trim_end().to_string();
+    migrated.push_str("\n\n# Corral automatic migration v7: GitHub state tree.\n");
+    for (key, action) in GITHUB_DEFAULT_BINDS {
+        if !existing.contains_key(key) {
+            migrated.push_str(&format!("corral bind {key} {action}\n"));
+        }
+    }
+    if !declares_function(&source, "github_preview") {
+        if let Some(block) = marked_block(default, GITHUB_FUNCTION_BEGIN, GITHUB_FUNCTION_END) {
+            migrated.push('\n');
+            migrated.push_str(block);
+            migrated.push('\n');
+        }
+    }
+    migrated = set_config_version(&migrated, GITHUB_CONFIG_VERSION);
+
+    let backup = path.with_extension(format!("sh.v{}.bak", config_version(&source)));
+    if !backup.exists() {
+        let _ = std::fs::copy(path, &backup);
+    }
+    let temp = path.with_extension(format!("sh.migrate-{}", std::process::id()));
+    let persisted = (|| -> std::io::Result<()> {
+        std::fs::write(&temp, &migrated)?;
+        if let Ok(metadata) = std::fs::metadata(path) {
+            std::fs::set_permissions(&temp, metadata.permissions())?;
+        }
+        std::fs::rename(&temp, path)
+    })();
+    if persisted.is_err() {
+        let _ = std::fs::remove_file(temp);
+    }
+    migrated
+}
+
 /// Run the config in *register mode* and collect `corral bind` calls.
 ///
 /// Like River: the script calls `corral bind <key> <action>`; in register mode
@@ -509,6 +701,21 @@ fn fallback_binds() -> HashMap<String, String> {
         ("explorer:a", internal::EXPLORER_CREATE),
         ("explorer:d", internal::EXPLORER_DELETE),
         ("explorer:r", internal::EXPLORER_RENAME),
+        ("github:i", internal::GITHUB_ISSUES),
+        ("github:p", internal::GITHUB_PULLS),
+        ("github:a", internal::GITHUB_ACTIONS),
+        ("github:enter", internal::GITHUB_VIEW),
+        ("github:o", internal::GITHUB_VIEW),
+        ("github:d", internal::GITHUB_DIFF),
+        ("github:c", internal::GITHUB_CHECKS),
+        ("github:x", internal::GITHUB_LOG_FAILED),
+        ("github:L", internal::GITHUB_LOG),
+        ("github:f", internal::GITHUB_FILTER),
+        ("github:]", internal::GITHUB_LOAD_MORE),
+        ("github:s", internal::GITHUB_CYCLE_STATE),
+        ("github:tab", internal::GITHUB_NEXT_SECTION),
+        ("github:backtab", internal::GITHUB_PREV_SECTION),
+        ("github:esc", internal::GITHUB_FILTER_CANCEL),
         ("u", internal::SCM_UNSTAGE_ALL),
         ("o", internal::SCM_OPEN_DIFF),
         ("c", internal::SCM_FOCUS_MESSAGE),
@@ -680,6 +887,66 @@ mod tests {
             config.action_for_feature_key("explorer", "G"),
             Some(internal::BOTTOM)
         );
+    }
+
+    #[test]
+    fn v7_migration_preserves_custom_github_bind_and_function() {
+        let path = tempfile_path("corral-config-migrate").unwrap();
+        let source = "CORRAL_CONFIG_VERSION=5\ncorral bind github:i my-issues\ngithub_preview() { printf custom; }\n";
+        let default = "CORRAL_CONFIG_VERSION=7\n# CORRAL_MIGRATION_V6_FUNCTION_BEGIN\ngithub_preview() { printf default; }\n# CORRAL_MIGRATION_V6_FUNCTION_END\n";
+        std::fs::write(&path, source).unwrap();
+        let migrated = migrate_config(&path, source, default);
+        let binds = textual_binds(&migrated);
+        assert_eq!(binds.get("github:i").map(String::as_str), Some("my-issues"));
+        assert!(migrated.contains("github_preview() { printf custom; }"));
+        assert!(!migrated.contains("printf default"));
+        assert_eq!(config_version(&migrated), 7);
+        let _ = std::fs::remove_file(path.with_extension("sh.v5.bak"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn v7_migration_adds_missing_bindings_and_preview_function() {
+        let path = tempfile_path("corral-config-migrate").unwrap();
+        let source = "CORRAL_CONFIG_VERSION=5\ncorral bind q quit\n";
+        let default = "CORRAL_CONFIG_VERSION=7\n# CORRAL_MIGRATION_V6_FUNCTION_BEGIN\ngithub_preview() { printf default; }\n# CORRAL_MIGRATION_V6_FUNCTION_END\n";
+        std::fs::write(&path, source).unwrap();
+        let migrated = migrate_config(&path, source, default);
+        let binds = textual_binds(&migrated);
+        assert_eq!(
+            binds.get("github:p").map(String::as_str),
+            Some(internal::GITHUB_PULLS)
+        );
+        assert!(migrated.contains("github_preview() { printf default; }"));
+        assert!(path.with_extension("sh.v5.bak").is_file());
+        let _ = std::fs::remove_file(path.with_extension("sh.v5.bak"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn v7_migration_releases_stock_l_binding_but_preserves_custom_l() {
+        let path = tempfile_path("corral-config-migrate").unwrap();
+        let default = "CORRAL_CONFIG_VERSION=7\n# CORRAL_MIGRATION_V6_FUNCTION_BEGIN\ngithub_preview() { :; }\n# CORRAL_MIGRATION_V6_FUNCTION_END\n";
+        let stock = "CORRAL_CONFIG_VERSION=6\ncorral bind github:l github-log-failed\ngithub_preview() { :; }\n";
+        std::fs::write(&path, stock).unwrap();
+        let migrated = migrate_config(&path, stock, default);
+        let binds = textual_binds(&migrated);
+        assert!(!binds.contains_key("github:l"));
+        assert_eq!(
+            binds.get("github:x").map(String::as_str),
+            Some(internal::GITHUB_LOG_FAILED)
+        );
+
+        let custom =
+            "CORRAL_CONFIG_VERSION=6\ncorral bind github:l my-expand\ngithub_preview() { :; }\n";
+        std::fs::write(&path, custom).unwrap();
+        let migrated = migrate_config(&path, custom, default);
+        assert_eq!(
+            textual_binds(&migrated).get("github:l").map(String::as_str),
+            Some("my-expand")
+        );
+        let _ = std::fs::remove_file(path.with_extension("sh.v6.bak"));
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
