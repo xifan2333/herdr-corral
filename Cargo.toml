@@ -27,6 +27,7 @@ crossterm = "0.28"
 # Detect whether the terminal can render Nerd Font glyphs (for future file icons).
 has-nerd-font = "0.20260228"
 devicons = "0.6"
+notify = "8"
 
 [profile.release]
 opt-level = "z"

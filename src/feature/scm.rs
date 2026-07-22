@@ -25,6 +25,37 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const AUTO_REFRESH: Duration = Duration::from_millis(1500);
+const NOTICE_SUCCESS_TTL: Duration = Duration::from_secs(2);
+const NOTICE_ERROR_TTL: Duration = Duration::from_secs(4);
+
+struct SuggestionCompletion {
+    root: PathBuf,
+    result: Result<String, String>,
+}
+
+fn clean_suggestion(output: &str) -> Result<String, String> {
+    let candidate = output
+        .lines()
+        .map(str::trim)
+        .rfind(|line| {
+            !line.is_empty()
+                && !line.starts_with("```")
+                && !line.starts_with("CORRAL_")
+                && !line.to_ascii_lowercase().starts_with("warning:")
+        })
+        .ok_or_else(|| "suggestion command returned no message".to_string())?;
+    let message = candidate
+        .trim_matches(|ch| matches!(ch, '\'' | '"' | '`'))
+        .trim_end_matches('.')
+        .trim();
+    if message.is_empty() {
+        return Err("suggestion command returned no message".into());
+    }
+    if message.chars().count() > 200 {
+        return Err("suggested message is longer than 200 characters".into());
+    }
+    Ok(message.to_string())
+}
 
 fn diff_action(staged: bool, letter: char) -> &'static str {
     if staged {
@@ -268,6 +299,7 @@ pub struct ScmView {
     nerd_font: bool,
     error: Option<String>,
     flash: Option<(String, bool)>,
+    flash_at: Option<Instant>,
     staged_collapsed: bool,
     changes_collapsed: bool,
     drawer_expanded: [bool; 8],
@@ -277,9 +309,11 @@ pub struct ScmView {
     cursor: usize,
     message_focused: bool,
     message_rect: Cell<Rect>,
+    suggest_rect: Cell<Rect>,
     commit_rect: Cell<Rect>,
     pending_discard: Option<FileEntry>,
     syncing: Option<Receiver<Result<String, String>>>,
+    suggesting: Option<Receiver<SuggestionCompletion>>,
     last_refresh: Instant,
     config: Arc<Config>,
 }
@@ -299,6 +333,7 @@ impl ScmView {
             nerd_font,
             error: None,
             flash: None,
+            flash_at: None,
             staged_collapsed: false,
             changes_collapsed: false,
             drawer_expanded: [false; 8],
@@ -308,14 +343,42 @@ impl ScmView {
             cursor: 0,
             message_focused: false,
             message_rect: Cell::new(Rect::default()),
+            suggest_rect: Cell::new(Rect::default()),
             commit_rect: Cell::new(Rect::default()),
             pending_discard: None,
             syncing: None,
+            suggesting: None,
             last_refresh: Instant::now(),
             config,
         };
         view.refresh();
         view
+    }
+
+    fn set_flash(&mut self, message: impl Into<String>, error: bool) {
+        self.flash = Some((message.into(), error));
+        self.flash_at = Some(Instant::now());
+    }
+
+    fn set_progress(&mut self, message: impl Into<String>) {
+        self.flash = Some((message.into(), false));
+        self.flash_at = None;
+    }
+
+    fn expire_flash(&mut self) {
+        let Some((_, error)) = self.flash.as_ref() else {
+            self.flash_at = None;
+            return;
+        };
+        let ttl = if *error {
+            NOTICE_ERROR_TTL
+        } else {
+            NOTICE_SUCCESS_TTL
+        };
+        if self.flash_at.is_some_and(|shown| shown.elapsed() >= ttl) {
+            self.flash = None;
+            self.flash_at = None;
+        }
     }
 
     fn refresh(&mut self) {
@@ -644,7 +707,7 @@ impl ScmView {
             }
             Err(error) => {
                 self.drawer_lines[drawer.index()].clear();
-                self.flash = Some((error, true));
+                self.set_flash(error, true);
             }
         }
     }
@@ -733,7 +796,7 @@ impl ScmView {
             return KeyOutcome::Handled;
         };
         if staged {
-            self.flash = Some(("unstage before discarding".into(), true));
+            self.set_flash("unstage before discarding", true);
         } else {
             self.pending_discard = Some(entry.clone());
         }
@@ -749,10 +812,10 @@ impl ScmView {
         };
         match git.discard(&entry) {
             Ok(()) => {
-                self.flash = Some((format!("discarded {}", entry.path), false));
+                self.set_flash(format!("discarded {}", entry.path), false);
                 self.refresh();
             }
-            Err(error) => self.flash = Some((error, true)),
+            Err(error) => self.set_flash(error, true),
         }
         KeyOutcome::Handled
     }
@@ -760,6 +823,36 @@ impl ScmView {
     fn cancel_transient(&mut self) -> KeyOutcome {
         self.pending_discard = None;
         self.message_focused = false;
+        KeyOutcome::Handled
+    }
+
+    fn suggest_message(&mut self) -> KeyOutcome {
+        if self.suggesting.is_some() {
+            return KeyOutcome::Handled;
+        }
+        let Some(git) = self.git.as_ref() else {
+            return KeyOutcome::Handled;
+        };
+        if self.status.staged.is_empty() && self.status.unstaged.is_empty() {
+            self.set_flash("no changes to describe", true);
+            return KeyOutcome::Handled;
+        }
+        let root = git.root().to_path_buf();
+        let worker_root = root.clone();
+        let config = Arc::clone(&self.config);
+        let env = vec![("CORRAL_GIT_ROOT".to_string(), root.display().to_string())];
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = config
+                .run_shell_capture("suggest_commit_message", Some(&worker_root), &env)
+                .and_then(|output| clean_suggestion(&output));
+            let _ = tx.send(SuggestionCompletion {
+                root: worker_root,
+                result,
+            });
+        });
+        self.suggesting = Some(rx);
+        self.set_progress("✧ generating commit message…");
         KeyOutcome::Handled
     }
 
@@ -776,21 +869,23 @@ impl ScmView {
             let _ = tx.send(git.sync(&status));
         });
         self.syncing = Some(rx);
-        self.flash = Some(("syncing…".into(), false));
+        self.set_progress("syncing…");
         KeyOutcome::Handled
     }
 
     fn on_message_key(&mut self, code: KeyCode, mods: KeyModifiers) -> KeyOutcome {
         let action = config::key_token(code, mods)
-            .and_then(|token| self.config.action_for_key(&token))
+            .and_then(|token| self.config.action_for_feature_key("scm", &token))
             .map(str::to_string);
         match action.as_deref() {
             Some(config::internal::TOGGLE | config::internal::SCM_COMMIT) => {
                 return self.commit_message();
             }
             Some(config::internal::SCM_CANCEL) => return self.cancel_transient(),
-            Some(config::internal::COLLAPSE) => self.cursor = self.cursor.saturating_sub(1),
-            Some(config::internal::EXPAND) => {
+            Some(config::internal::COLLAPSE) if !matches!(code, KeyCode::Char(_)) => {
+                self.cursor = self.cursor.saturating_sub(1);
+            }
+            Some(config::internal::EXPAND) if !matches!(code, KeyCode::Char(_)) => {
                 self.cursor = (self.cursor + 1).min(self.message.len());
             }
             Some(config::internal::EDIT_BACKSPACE) if self.cursor > 0 => {
@@ -953,7 +1048,11 @@ impl ScmView {
             a if a == config::internal::SCM_CONFIRM => KeyOutcome::Handled,
             a if a == config::internal::SCM_CANCEL => self.cancel_transient(),
             a if a == config::internal::SCM_SYNC => self.sync_changes(),
+            a if a == config::internal::SCM_SUGGEST_MESSAGE => self.suggest_message(),
             a if a == config::internal::TOGGLE_HIDDEN
+                || a == config::internal::EXPLORER_CREATE
+                || a == config::internal::EXPLORER_DELETE
+                || a == config::internal::EXPLORER_RENAME
                 || a == config::internal::EDIT_BACKSPACE
                 || a == config::internal::EDIT_DELETE
                 || a == config::internal::EDIT_HOME
@@ -1075,15 +1174,40 @@ impl FeatureView for ScmView {
             palette.surface1
         };
         frame.render_widget(
-            Paragraph::new(if message.is_empty() {
-                "commit message".into()
-            } else {
-                message
-            })
-            .style(message_style)
-            .block(Block::bordered().border_style(Style::default().fg(border))),
+            Paragraph::new(message)
+                .style(message_style)
+                .block(Block::bordered().border_style(Style::default().fg(border))),
             message_rect,
         );
+        let suggest_rect = if message_rect.width >= 6 {
+            Rect::new(
+                message_rect
+                    .x
+                    .saturating_add(message_rect.width.saturating_sub(4)),
+                message_rect.y.saturating_add(1),
+                3,
+                1,
+            )
+        } else {
+            Rect::default()
+        };
+        self.suggest_rect.set(suggest_rect);
+        if suggest_rect.width > 0 {
+            frame.render_widget(
+                Paragraph::new(if self.suggesting.is_some() {
+                    " … "
+                } else {
+                    " ✧ "
+                })
+                .style(
+                    Style::default()
+                        .fg(palette.accent)
+                        .bg(palette.panel_bg)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                suggest_rect,
+            );
+        }
 
         let commit_rect = Rect::new(area.x, area.y.saturating_add(4), area.width, 1);
         self.commit_rect.set(commit_rect);
@@ -1320,7 +1444,11 @@ impl FeatureView for ScmView {
         let Some(token) = config::key_token(code, mods) else {
             return KeyOutcome::Ignored;
         };
-        let Some(action) = self.config.action_for_key(&token).map(str::to_string) else {
+        let Some(action) = self
+            .config
+            .action_for_feature_key("scm", &token)
+            .map(str::to_string)
+        else {
             return KeyOutcome::Ignored;
         };
         self.dispatch_action(&action)
@@ -1338,16 +1466,19 @@ impl FeatureView for ScmView {
             self.message.clear();
             self.cursor = 0;
             self.message_focused = false;
-            self.flash = Some(("commit created".into(), false));
+            self.set_flash("commit created", false);
             self.refresh();
         } else {
-            self.flash = Some(("commit failed".into(), true));
+            self.set_flash("commit failed", true);
         }
     }
 
     fn on_mouse(&mut self, mouse: MouseEvent) -> KeyOutcome {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
+                if ui::hit(self.suggest_rect.get(), mouse.column, mouse.row) {
+                    return self.suggest_message();
+                }
                 if ui::hit(self.message_rect.get(), mouse.column, mouse.row) {
                     return self.focus_message();
                 }
@@ -1394,6 +1525,39 @@ impl FeatureView for ScmView {
     }
 
     fn on_tick(&mut self) {
+        let suggestion = self.suggesting.as_ref().and_then(|rx| match rx.try_recv() {
+            Ok(result) => Some(result),
+            Err(TryRecvError::Empty) => None,
+            Err(TryRecvError::Disconnected) => Some(SuggestionCompletion {
+                root: self
+                    .git
+                    .as_ref()
+                    .map(|git| git.root().to_path_buf())
+                    .unwrap_or_default(),
+                result: Err("suggestion worker stopped".into()),
+            }),
+        });
+        if let Some(completion) = suggestion {
+            self.suggesting = None;
+            let same_repo = self
+                .git
+                .as_ref()
+                .is_some_and(|git| git.root() == completion.root);
+            if same_repo {
+                match completion.result {
+                    Ok(message) => {
+                        self.message = message.chars().collect();
+                        self.cursor = self.message.len();
+                        self.message_focused = true;
+                        self.set_flash("✧ suggestion ready — edit or commit", false);
+                    }
+                    Err(error) => self.set_flash(error, true),
+                }
+            } else {
+                self.set_flash("suggestion ignored: repository changed", true);
+            }
+        }
+
         let completed = self.syncing.as_ref().and_then(|rx| match rx.try_recv() {
             Ok(result) => Some(result),
             Err(TryRecvError::Empty) => None,
@@ -1402,19 +1566,45 @@ impl FeatureView for ScmView {
         if let Some(result) = completed {
             self.syncing = None;
             match result {
-                Ok(message) => self.flash = Some((message, false)),
-                Err(error) => self.flash = Some((error, true)),
+                Ok(message) => self.set_flash(message, false),
+                Err(error) => self.set_flash(error, true),
             }
             self.refresh();
         } else if self.last_refresh.elapsed() >= AUTO_REFRESH {
             self.refresh();
         }
+        self.expire_flash();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notices_expire_but_progress_remains() {
+        let mut view = ScmView::new(
+            PathBuf::from("/corral-test-no-repo"),
+            false,
+            Arc::new(Config::for_test()),
+        );
+        view.set_flash("done", false);
+        view.flash_at = Some(Instant::now() - Duration::from_secs(3));
+        view.expire_flash();
+        assert!(view.flash.is_none());
+
+        view.set_flash("failed", true);
+        view.flash_at = Some(Instant::now() - Duration::from_secs(3));
+        view.expire_flash();
+        assert!(view.flash.is_some());
+        view.flash_at = Some(Instant::now() - Duration::from_secs(5));
+        view.expire_flash();
+        assert!(view.flash.is_none());
+
+        view.set_progress("working…");
+        view.expire_flash();
+        assert!(view.flash.is_some());
+    }
 
     #[test]
     fn diff_kind_respects_section_and_untracked_state() {
@@ -1449,6 +1639,16 @@ mod tests {
     }
 
     #[test]
+    fn suggestion_output_is_reduced_to_one_editable_subject() {
+        assert_eq!(
+            clean_suggestion("warning: noisy provider\n```\n'Fix generated message.'\n").unwrap(),
+            "Fix generated message"
+        );
+        assert!(clean_suggestion("\n```\n").is_err());
+        assert!(clean_suggestion(&"x".repeat(201)).is_err());
+    }
+
+    #[test]
     fn drawer_lines_keep_actionable_references() {
         let history = log_drawer_item("abc1234\tfix history".into());
         assert_eq!(history.display, "abc1234 fix history");
@@ -1472,6 +1672,49 @@ mod tests {
             "example/repo"
         );
         assert_eq!(short_remote_url("/srv/git/repo.git"), "repo");
+    }
+
+    #[test]
+    fn async_suggestion_replaces_message_and_focuses_input() {
+        let root = std::env::temp_dir().join(format!(
+            "corral-suggest-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let git = |args: &[&str]| {
+            assert!(std::process::Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .status()
+                .unwrap()
+                .success());
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "Test"]);
+        std::fs::write(root.join("file.txt"), "change\n").unwrap();
+        git(&["add", "file.txt"]);
+
+        let mut config = Config::for_test();
+        config.source = "suggest_commit_message() { printf '\"Generated subject.\"\\n'; }".into();
+        let mut view = ScmView::new(root.clone(), false, Arc::new(config));
+        view.message = "keep on failure".chars().collect();
+        assert!(matches!(view.suggest_message(), KeyOutcome::Handled));
+        for _ in 0..30 {
+            std::thread::sleep(Duration::from_millis(20));
+            view.on_tick();
+            if view.suggesting.is_none() {
+                break;
+            }
+        }
+        assert_eq!(view.message.iter().collect::<String>(), "Generated subject");
+        assert!(view.message_focused);
+        assert_eq!(view.cursor, view.message.len());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

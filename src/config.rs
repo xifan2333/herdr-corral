@@ -21,6 +21,7 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 /// Internal actions handled by the TUI (not shell).
 pub mod internal {
@@ -38,6 +39,10 @@ pub mod internal {
     pub const SCM_CONFIRM: &str = "scm-confirm";
     pub const SCM_CANCEL: &str = "scm-cancel";
     pub const SCM_SYNC: &str = "scm-sync";
+    pub const SCM_SUGGEST_MESSAGE: &str = "scm-suggest-message";
+    pub const EXPLORER_CREATE: &str = "explorer-create";
+    pub const EXPLORER_DELETE: &str = "explorer-delete";
+    pub const EXPLORER_RENAME: &str = "explorer-rename";
     pub const EDIT_BACKSPACE: &str = "edit-backspace";
     pub const EDIT_DELETE: &str = "edit-delete";
     pub const EDIT_HOME: &str = "edit-home";
@@ -122,6 +127,21 @@ impl Config {
             .map(String::as_str)
     }
 
+    /// Feature-local binding wins over a global binding for the same key.
+    /// Scoped keys retain the two-argument config syntax, for example:
+    /// `corral bind explorer:a explorer-create`.
+    pub fn action_for_feature_key(&self, feature: &str, key_token: &str) -> Option<&str> {
+        let scoped = format!(
+            "{}:{}",
+            feature.to_ascii_lowercase(),
+            normalize_key(key_token)
+        );
+        self.binds
+            .get(&scoped)
+            .or_else(|| self.binds.get(&normalize_key(key_token)))
+            .map(String::as_str)
+    }
+
     pub fn is_internal(action: &str) -> bool {
         matches!(
             action,
@@ -139,6 +159,10 @@ impl Config {
                 | internal::SCM_CONFIRM
                 | internal::SCM_CANCEL
                 | internal::SCM_SYNC
+                | internal::SCM_SUGGEST_MESSAGE
+                | internal::EXPLORER_CREATE
+                | internal::EXPLORER_DELETE
+                | internal::EXPLORER_RENAME
                 | internal::EDIT_BACKSPACE
                 | internal::EDIT_DELETE
                 | internal::EDIT_HOME
@@ -244,6 +268,88 @@ impl Config {
             },
         }
     }
+
+    /// Run a provider-style shell action off the TUI thread and return stdout.
+    /// The action receives the same Corral environment as `run_shell`, but no
+    /// TTY. Diagnostics come from stderr and the caller decides how to display
+    /// or parse the captured text.
+    pub fn run_shell_capture(
+        &self,
+        action: &str,
+        file: Option<&Path>,
+        extra_env: &[(String, String)],
+    ) -> Result<String, String> {
+        if !is_safe_fn_name(action) {
+            return Err("unsafe shell action name".into());
+        }
+        let mut cmd = Command::new("bash");
+        cmd.arg("-c").arg(format!(
+            "set -euo pipefail\n{source}\n\
+             if declare -F {action} >/dev/null 2>&1; then {action} \"$@\"; \
+             else printf 'corral: no shell action: %s\\n' {action} >&2; exit 127; fi\n",
+            source = self.source,
+            action = action,
+        ));
+        cmd.arg("--");
+        if let Some(path) = file {
+            cmd.arg(path);
+        }
+        cmd.env("CORRAL_CONFIG_DIR", &self.dir);
+        cmd.env("CORRAL_CONFIG", &self.path);
+        cmd.env("CORRAL_ACTION", action);
+        cmd.env("PATH", path_with_exe_dir());
+        if let Some(path) = file {
+            cmd.env("CORRAL_FILE", path);
+            if let Some(parent) = path.parent() {
+                cmd.env("CORRAL_DIR", parent);
+            }
+        }
+        for (key, value) in extra_env {
+            cmd.env(key, value);
+        }
+        let mut child = cmd
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| format!("suggestion command: {error}"))?;
+        let started = Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) if started.elapsed() < Duration::from_secs(60) => {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                Ok(None) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err("suggestion command timed out after 60 seconds".into());
+                }
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!("suggestion command: {error}"));
+                }
+            }
+        }
+        let output = child
+            .wait_with_output()
+            .map_err(|error| format!("suggestion command: {error}"))?;
+        if !output.status.success() {
+            let error = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(if error.is_empty() {
+                format!("suggestion command exited with {}", output.status)
+            } else {
+                error
+            });
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if stdout.is_empty() {
+            Err("suggestion command returned no message".into())
+        } else {
+            Ok(stdout)
+        }
+    }
 }
 
 /// Outcome of running a config.sh action.
@@ -313,7 +419,7 @@ fn collect_binds(source: &str) -> HashMap<String, String> {
                     let k = k.trim();
                     let a = a.trim();
                     if !k.is_empty() && !a.is_empty() {
-                        binds.insert(normalize_key(k), a.to_string());
+                        binds.insert(normalize_binding_key(k), a.to_string());
                     }
                 }
             }
@@ -341,7 +447,7 @@ pub fn cli_bind(args: &[String]) -> std::io::Result<()> {
             .append(true)
             .open(path)
         {
-            let _ = writeln!(f, "{}\t{}", normalize_key(key), action);
+            let _ = writeln!(f, "{}\t{}", normalize_binding_key(key), action);
         }
     }
     Ok(())
@@ -354,6 +460,15 @@ fn normalize_key(s: &str) -> String {
         s.to_string()
     } else {
         s.to_ascii_lowercase()
+    }
+}
+
+fn normalize_binding_key(s: &str) -> String {
+    match s.split_once(':') {
+        Some((feature, key)) if !feature.is_empty() && !key.is_empty() => {
+            format!("{}:{}", feature.to_ascii_lowercase(), normalize_key(key))
+        }
+        _ => normalize_key(s),
     }
 }
 
@@ -391,6 +506,9 @@ fn fallback_binds() -> HashMap<String, String> {
         ("s", internal::SCM_TOGGLE_STAGE),
         ("space", internal::SCM_TOGGLE_STAGE),
         ("a", internal::SCM_STAGE_ALL),
+        ("explorer:a", internal::EXPLORER_CREATE),
+        ("explorer:d", internal::EXPLORER_DELETE),
+        ("explorer:r", internal::EXPLORER_RENAME),
         ("u", internal::SCM_UNSTAGE_ALL),
         ("o", internal::SCM_OPEN_DIFF),
         ("c", internal::SCM_FOCUS_MESSAGE),
@@ -537,6 +655,51 @@ mod tests {
         assert_eq!(
             key_token(KeyCode::Backspace, KeyModifiers::NONE).as_deref(),
             Some("backspace")
+        );
+    }
+
+    #[test]
+    fn scoped_bindings_override_globals_without_losing_key_case() {
+        let mut config = Config::for_test();
+        config
+            .binds
+            .insert("explorer:a".into(), internal::EXPLORER_CREATE.into());
+        config
+            .binds
+            .insert("explorer:G".into(), internal::BOTTOM.into());
+        assert_eq!(
+            config.action_for_feature_key("explorer", "a"),
+            Some(internal::EXPLORER_CREATE)
+        );
+        assert_eq!(
+            config.action_for_feature_key("scm", "a"),
+            Some(internal::SCM_STAGE_ALL)
+        );
+        assert_eq!(normalize_binding_key("Explorer:G"), "explorer:G");
+        assert_eq!(
+            config.action_for_feature_key("explorer", "G"),
+            Some(internal::BOTTOM)
+        );
+    }
+
+    #[test]
+    fn shell_capture_returns_provider_output_and_errors() {
+        let mut config = Config::for_test();
+        config.source = "suggest_commit_message() { printf 'Fix generated message\\n'; }".into();
+        assert_eq!(
+            config
+                .run_shell_capture("suggest_commit_message", None, &[])
+                .unwrap(),
+            "Fix generated message"
+        );
+
+        config.source =
+            "suggest_commit_message() { printf 'provider failed\\n' >&2; return 9; }".into();
+        assert_eq!(
+            config
+                .run_shell_capture("suggest_commit_message", None, &[])
+                .unwrap_err(),
+            "provider failed"
         );
     }
 }

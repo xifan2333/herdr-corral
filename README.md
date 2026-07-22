@@ -37,12 +37,15 @@ herdr plugin action invoke corral.open
 `j`/`k` 导航，`q` 退出。
 
 Explorer：`h`/`l` 折叠/展开，`PageUp`/`PageDown` 翻页，`.` 显示/隐藏
-点文件（始终排除 `.git`），`z` 折叠全部，`Enter` 打开。
+点文件（始终排除 `.git`），`z` 折叠全部，`Enter` 打开；`a` 新建（名称
+以 `/` 结尾时创建目录），`d` 确认删除，`r` 重命名。根目录使用 recursive
+filesystem watcher，Corral 内外的文件变化都会自动更新，无需手动刷新。
 
 SCM：`Enter`/`s` 暂存或取消暂存，`a` 全部暂存，`u` 全部取消暂存，
 `o` 查看 staged/worktree/untracked diff，`c` 聚焦内联提交信息并用 `Enter`
-提交，`D` 确认后丢弃改动，`S` 后台同步，`h`/`l` 折叠/展开分组，`r` 刷新；
-Graph、Commits、File History、Branches、Worktrees、Remotes、Stashes、Tags
+提交，`A` 异步生成智能 commit message，`D` 确认后丢弃改动，`S` 后台同步，
+`h`/`l` 折叠/展开分组，`r` 刷新；Graph、Commits、File History、Branches、
+Worktrees、Remotes、Stashes、Tags
 均为真实 drawer。保持打开时每 1.5 秒自动刷新。所有键位仍只来自 `config.sh`。
 
 独立 diff 过滤器（与 Corral 使用同一主题）：
@@ -53,6 +56,10 @@ git diff | ./target/release/corral-diff | less -R
 
 SCM 默认使用 `corral-diff`；可在 `config.sh` 设置
 `CORRAL_DIFF_TOOL=corral|difft|fancy|delta|git`。
+
+智能 commit provider 完全由 `config.sh` 控制。默认使用非交互 `pi -p`；
+也可将 `CORRAL_COMMIT_SUGGEST_CMD` 替换为其他 agent 或自定义脚本。命令
+接收包含 label 规则、文件列表和 diff 的消息参数，并从 stdout 返回一行 subject。
 
 ## 模块
 
@@ -70,7 +77,7 @@ SCM 默认使用 `corral-diff`；可在 `config.sh` 设置
 ## 下一步
 
 1. `config.sh` 版本迁移执行器与 editor pane/socket 回收
-2. Explorer Change Folder 与文件管理操作
-3. SCM drawer context menu 与 destructive-action confirmation
+2. Explorer Change Folder
+3. SCM drawer destructive-action confirmation
 4. 自动 ensure / toggle
 5. GitHub 独立 adapter + view

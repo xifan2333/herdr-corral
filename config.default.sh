@@ -5,14 +5,16 @@
 #   standalone: ${XDG_CONFIG_HOME:-~/.config}/corral/config.sh
 # Edit THAT file — no recompile needed. Future migrations use this in-place
 # version and preserve customized bindings/functions.
-CORRAL_CONFIG_VERSION=1
+CORRAL_CONFIG_VERSION=5
 #
 # River-style: call `corral bind <key> <action>` (like `riverctl map …`).
 #   global actions: quit feature-explorer feature-scm feature-github
 #   navigation:     up down top bottom page-up page-down toggle expand
 #                   collapse collapse-all toggle-hidden refresh open
+#   Explorer:       explorer-create explorer-delete explorer-rename
 #   SCM actions:    scm-toggle-stage scm-stage-all scm-unstage-all scm-open-diff
-#                   scm-focus-message scm-discard scm-confirm scm-cancel scm-sync
+#                   scm-focus-message scm-suggest-message scm-discard
+#                   scm-confirm scm-cancel scm-sync
 #   text editing:   edit-backspace edit-delete edit-home edit-end
 #   any other action = a shell function of that name (defined below)
 #
@@ -43,6 +45,9 @@ corral bind enter toggle
 corral bind . toggle-hidden
 corral bind z collapse-all
 corral bind r refresh
+corral bind explorer:a explorer-create
+corral bind explorer:d explorer-delete
+corral bind explorer:r explorer-rename
 
 corral bind s scm-toggle-stage
 corral bind space scm-toggle-stage
@@ -55,6 +60,7 @@ corral bind y scm-confirm
 corral bind n scm-cancel
 corral bind esc scm-cancel
 corral bind S scm-sync
+corral bind A scm-suggest-message
 corral bind backspace edit-backspace
 corral bind delete edit-delete
 corral bind home edit-home
@@ -383,6 +389,42 @@ open_worktree() {
   local path="${CORRAL_WORKTREE_PATH:-${1:-}}"
   [[ -n "$path" && -d "$path" ]] || return 1
   open "$path"
+}
+
+# Optional intelligent commit-message provider. Corral appends one prompt
+# argument containing instructions, changed files, and the bounded Git diff.
+# The command must print one proposed subject line on stdout.
+# Examples:
+#   CORRAL_COMMIT_SUGGEST_CMD='pi -p --no-tools --no-session --no-context-files'
+#   CORRAL_COMMIT_SUGGEST_CMD='my-local-model --prompt'
+CORRAL_COMMIT_SUGGEST_CMD='pi -p --no-tools --no-session --no-context-files'
+CORRAL_COMMIT_SUGGEST_PROMPT="${CORRAL_COMMIT_SUGGEST_PROMPT:-Generate exactly one Git commit subject following Conventional Commits 1.0.0. Format: <type>[optional scope][optional !]: <description>. Choose the single best type: feat for a new user-visible capability; fix for a defect; refactor for an internal change with no behavior change; perf for performance; docs for documentation only; test for tests only; build for build or dependency changes; ci for CI; style for formatting only; chore only when no more specific type fits. Add a short noun scope only when the affected component is unambiguous. Add ! only when the diff clearly introduces an incompatible API or behavior change. Write a specific present-tense imperative description that completes 'If applied, this commit will ...'. Prefer 50 characters for the whole subject and never exceed 72. Do not end with punctuation. Do not output quotes, Markdown, explanations, issue IDs, or a body. Base the subject only on the supplied files and diff; never invent changes. Good: 'feat(scm): add configurable commit suggestions'. Good: 'fix(diff): ignore stat separators outside hunks'. Bad: 'chore: update stuff'. Output only the subject line.}"
+suggest_commit_message() {
+  local dir="${CORRAL_GIT_ROOT:-${1:-.}}" diff files
+  [[ -n "$CORRAL_COMMIT_SUGGEST_CMD" ]] || {
+    printf 'Set CORRAL_COMMIT_SUGGEST_CMD in config.sh to enable suggestions.\n' >&2
+    return 1
+  }
+  diff=$(git -C "$dir" --literal-pathspecs diff --cached --stat --patch --no-ext-diff)
+  files=$(git -C "$dir" --literal-pathspecs diff --cached --name-only)
+  if [[ -z "$diff" ]]; then
+    diff=$(git -C "$dir" --literal-pathspecs diff --stat --patch --no-ext-diff)
+    files=$(git -C "$dir" --literal-pathspecs diff --name-only)
+  fi
+  if [[ -z "$files" ]]; then
+    files=$(git -C "$dir" --literal-pathspecs ls-files --others --exclude-standard)
+  fi
+  [[ -n "$diff" || -n "$files" ]] || {
+    printf 'no changes to describe\n' >&2
+    return 1
+  }
+  diff=${diff:0:16384}
+  local payload
+  payload="$CORRAL_COMMIT_SUGGEST_PROMPT"$'\n\nChanged files:\n'"$files"$'\n\nGit diff:\n'"$diff"
+  export CORRAL_COMMIT_SUGGEST_PROMPT CORRAL_COMMIT_FILES="$files"
+  # The second eval argument remains a literal double-quoted shell variable,
+  # so arbitrary diff contents never become shell source.
+  eval "$CORRAL_COMMIT_SUGGEST_CMD" ' "$payload"'
 }
 
 # Commit the SCM panel's inline message. The TUI receives success/failure and
