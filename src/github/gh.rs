@@ -350,8 +350,12 @@ impl GitHubDetailAdapter for GhCli {
                 }
                 (args, None)
             }
-            GitHubMutation::WorkflowDispatch { workflow, r#ref } => (
-                vec![
+            GitHubMutation::WorkflowDispatch {
+                workflow,
+                r#ref,
+                inputs,
+            } => {
+                let mut args = vec![
                     "workflow".into(),
                     "run".into(),
                     workflow.clone(),
@@ -359,9 +363,13 @@ impl GitHubDetailAdapter for GhCli {
                     repo.into(),
                     "--ref".into(),
                     r#ref.clone(),
-                ],
-                None,
-            ),
+                ];
+                for (key, value) in inputs {
+                    args.push("-f".into());
+                    args.push(format!("{key}={value}"));
+                }
+                (args, None)
+            }
         };
         let output = self.output_with_input(&args, input)?;
         Ok(String::from_utf8_lossy(&output).trim().to_string())
@@ -438,13 +446,32 @@ impl GitHubAdapter for GhCli {
         ])
     }
 
-    fn dispatch_workflow(
+    fn workflow_yaml(
         &self,
         repo: &Repository,
         workflow: &str,
         r#ref: &str,
     ) -> Result<String, String> {
-        let output = self.output(&[
+        self.text(&[
+            "workflow".into(),
+            "view".into(),
+            workflow.into(),
+            "--repo".into(),
+            repo.selector.clone(),
+            "--ref".into(),
+            r#ref.into(),
+            "--yaml".into(),
+        ])
+    }
+
+    fn dispatch_workflow(
+        &self,
+        repo: &Repository,
+        workflow: &str,
+        r#ref: &str,
+        inputs: &[(String, String)],
+    ) -> Result<String, String> {
+        let mut args = vec![
             "workflow".into(),
             "run".into(),
             workflow.into(),
@@ -452,7 +479,12 @@ impl GitHubAdapter for GhCli {
             repo.selector.clone(),
             "--ref".into(),
             r#ref.into(),
-        ])?;
+        ];
+        for (key, value) in inputs {
+            args.push("-f".into());
+            args.push(format!("{key}={value}"));
+        }
+        let output = self.output(&args)?;
         Ok(String::from_utf8_lossy(&output).trim().to_string())
     }
 }

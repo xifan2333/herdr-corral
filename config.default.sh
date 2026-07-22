@@ -5,7 +5,7 @@
 #   standalone: ${XDG_CONFIG_HOME:-~/.config}/corral/config.sh
 # Edit THAT file — no recompile needed. Future migrations use this in-place
 # version and preserve customized bindings/functions.
-CORRAL_CONFIG_VERSION=11
+CORRAL_CONFIG_VERSION=12
 #
 # River-style: call `corral bind <key> <action>` (like `riverctl map …`).
 #   global actions: quit feature-explorer feature-scm feature-github
@@ -72,6 +72,7 @@ corral bind A scm-suggest-message
 corral bind github:i github-issues
 corral bind github:p github-pulls
 corral bind github:a github-actions
+corral bind github:w github-workflows
 corral bind github:enter github-view
 corral bind github:o github-view
 corral bind github:d github-diff

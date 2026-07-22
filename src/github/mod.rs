@@ -8,8 +8,9 @@ mod model;
 
 pub use gh::GhCli;
 pub use model::{
-    Actor, Comment, Issue, IssueDetail, PullFile, PullRequest, PullRequestDetail, Repository,
-    Review, Workflow, WorkflowJob, WorkflowRun, WorkflowRunDetail, WorkflowStep,
+    parse_workflow_dispatch, Actor, Comment, Issue, IssueDetail, PullFile, PullRequest,
+    PullRequestDetail, Repository, Review, Workflow, WorkflowInput, WorkflowJob, WorkflowRun,
+    WorkflowRunDetail, WorkflowStep,
 };
 
 /// Read-only GitHub operations used by the first GitHub feature slice.
@@ -101,6 +102,7 @@ pub enum GitHubMutation {
     WorkflowDispatch {
         workflow: String,
         r#ref: String,
+        inputs: Vec<(String, String)>,
     },
 }
 
@@ -124,10 +126,17 @@ pub trait GitHubAdapter: Send + Sync {
     ) -> Result<Vec<PullRequest>, String>;
     fn runs(&self, repo: &Repository, limit: usize) -> Result<Vec<WorkflowRun>, String>;
     fn workflows(&self, repo: &Repository) -> Result<Vec<Workflow>, String>;
+    fn workflow_yaml(
+        &self,
+        repo: &Repository,
+        workflow: &str,
+        r#ref: &str,
+    ) -> Result<String, String>;
     fn dispatch_workflow(
         &self,
         repo: &Repository,
         workflow: &str,
         r#ref: &str,
+        inputs: &[(String, String)],
     ) -> Result<String, String>;
 }
