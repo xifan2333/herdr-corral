@@ -13,10 +13,7 @@ pub const ACTIVITY_HEIGHT: u16 = 3;
 pub fn split_sidebar(area: Rect) -> (Rect, Rect) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(ACTIVITY_HEIGHT),
-            Constraint::Min(1),
-        ])
+        .constraints([Constraint::Length(ACTIVITY_HEIGHT), Constraint::Min(1)])
         .split(area);
     (rows[0], rows[1])
 }

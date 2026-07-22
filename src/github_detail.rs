@@ -5,8 +5,8 @@
 
 use crate::config::{self, Config};
 use crate::github::{
-    Comment, GhCli, GitHubDetailAdapter, GitHubMutation, IssueDetail, MergeMethod,
-    PullRequestDetail, Review, WorkflowRunDetail,
+    GhCli, GitHubDetailAdapter, GitHubMutation, IssueDetail, MergeMethod, PullRequestDetail,
+    Review, WorkflowRunDetail,
 };
 use crate::ui::Palette;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
@@ -14,14 +14,19 @@ use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
+use pulldown_cmark::{Event as MdEvent, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::{Frame, Terminal};
+use ratatui_image::picker::{Picker, ProtocolType};
+use ratatui_image::protocol::StatefulProtocol;
+use ratatui_image::{Resize, StatefulImage};
 use serde_json::Value;
-use std::io::{self, Stdout};
+use std::collections::{HashMap, HashSet};
+use std::io::{self, Read, Stdout};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
@@ -30,6 +35,33 @@ use std::time::{Duration, Instant};
 const NOTICE_SUCCESS_TTL: Duration = Duration::from_secs(2);
 const NOTICE_ERROR_TTL: Duration = Duration::from_secs(4);
 const MAX_MESSAGE_CHARS: usize = 65_536;
+const DEFAULT_IMAGE_ROWS: u16 = 12;
+const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+
+/// One markdown image discovered while rendering, keyed by its final line index.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ImagePlacement {
+    line: usize,
+    url: String,
+    rows: u16,
+}
+
+/// Runtime image toggle. Off unless the host opts in via config/env, because
+/// inline graphics only work on a kitty-protocol-capable terminal.
+fn images_enabled() -> bool {
+    matches!(
+        std::env::var("CORRAL_GITHUB_IMAGES").ok().as_deref(),
+        Some("1") | Some("true") | Some("yes") | Some("on")
+    )
+}
+
+fn image_rows() -> u16 {
+    std::env::var("CORRAL_GITHUB_IMAGE_ROWS")
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .filter(|rows| *rows > 0)
+        .unwrap_or(DEFAULT_IMAGE_ROWS)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DetailResource {
@@ -149,6 +181,11 @@ struct DetailApp {
     content_revision: u64,
     rendered_key: Option<(Tab, u16, u64)>,
     rendered_lines: Vec<Line<'static>>,
+    images: Vec<ImagePlacement>,
+    images_enabled: bool,
+    picker: Option<Picker>,
+    protocols: HashMap<String, StatefulProtocol>,
+    image_errors: HashSet<String>,
     generation: u64,
     sender: Sender<Completion>,
     receiver: Receiver<Completion>,
@@ -196,6 +233,11 @@ impl DetailApp {
             content_revision: 0,
             rendered_key: None,
             rendered_lines: Vec::new(),
+            images: Vec::new(),
+            images_enabled: images_enabled(),
+            picker: None,
+            protocols: HashMap::new(),
+            image_errors: HashSet::new(),
             generation: 0,
             sender,
             receiver,
@@ -221,14 +263,14 @@ impl DetailApp {
 
     fn tab_for_initial(&self, initial: InitialView) -> Tab {
         match (self.resource, initial) {
-            (DetailResource::Issue(_), InitialView::Conversation) => Tab::Conversation,
-            (DetailResource::Pull(_), InitialView::Conversation) => Tab::Conversation,
+            (DetailResource::Issue(_), _) => Tab::Conversation,
             (DetailResource::Pull(_), InitialView::Files) => Tab::Files,
             (DetailResource::Pull(_), InitialView::Diff) => Tab::Diff,
             (DetailResource::Pull(_), InitialView::Checks) => Tab::Checks,
+            (DetailResource::Pull(_), _) => Tab::Conversation,
             (DetailResource::Run(_), InitialView::Jobs) => Tab::Jobs,
             (DetailResource::Run(_), InitialView::Log | InitialView::FailedLog) => Tab::Log,
-            _ => Tab::Overview,
+            (DetailResource::Run(_), _) => Tab::Overview,
         }
     }
 
@@ -646,6 +688,87 @@ impl DetailApp {
         }) {
             self.notice = None;
         }
+        self.load_pending_images();
+    }
+
+    fn ensure_picker(&mut self) {
+        if self.picker.is_none() {
+            let mut picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
+            // The host explicitly opted into kitty graphics.
+            picker.set_protocol_type(ProtocolType::Kitty);
+            self.picker = Some(picker);
+        }
+    }
+
+    /// Best-effort, bounded image fetch. Runs off the draw path so a slow image
+    /// never blocks rendering; at most two new images are decoded per tick.
+    fn load_pending_images(&mut self) {
+        if !self.images_enabled || self.images.is_empty() {
+            return;
+        }
+        self.ensure_picker();
+        let picker = self.picker.take();
+        if let Some(picker) = &picker {
+            let mut loaded = 0;
+            for placement in self.images.clone() {
+                if loaded >= 2 {
+                    break;
+                }
+                if self.protocols.contains_key(&placement.url)
+                    || self.image_errors.contains(&placement.url)
+                {
+                    continue;
+                }
+                match fetch_image(&placement.url) {
+                    Ok(image) => {
+                        self.protocols
+                            .insert(placement.url.clone(), picker.new_resize_protocol(image));
+                    }
+                    Err(_) => {
+                        self.image_errors.insert(placement.url.clone());
+                    }
+                }
+                loaded += 1;
+            }
+        }
+        self.picker = picker;
+    }
+
+    fn render_images(&mut self, frame: &mut Frame, body: Rect) {
+        if !self.images_enabled || self.protocols.is_empty() {
+            return;
+        }
+        let scroll = self.scroll;
+        let height = usize::from(body.height);
+        // Collect visible placements first to avoid borrow conflicts.
+        let visible: Vec<(u16, u16, String)> = self
+            .images
+            .iter()
+            .filter_map(|placement| {
+                if placement.line < scroll || placement.line - scroll >= height {
+                    return None;
+                }
+                let offset = u16::try_from(placement.line - scroll).ok()?;
+                let avail = body.height.saturating_sub(offset);
+                let rows = placement.rows.min(avail);
+                (rows >= 2).then(|| (offset, rows, placement.url.clone()))
+            })
+            .collect();
+        for (offset, rows, url) in visible {
+            if let Some(protocol) = self.protocols.get_mut(&url) {
+                let rect = Rect {
+                    x: body.x.saturating_add(3),
+                    y: body.y.saturating_add(offset),
+                    width: body.width.saturating_sub(3),
+                    height: rows,
+                };
+                frame.render_stateful_widget(
+                    StatefulImage::<StatefulProtocol>::new().resize(Resize::Fit(None)),
+                    rect,
+                    protocol,
+                );
+            }
+        }
     }
 
     fn scroll_by(&mut self, delta: isize, line_count: usize) {
@@ -799,15 +922,15 @@ impl DetailApp {
         false
     }
 
-    fn title(&self) -> String {
+    fn title_parts(&self) -> (String, String) {
         match &self.detail {
-            Some(Detail::Issue(issue)) => format!("#{}  {}", issue.number, issue.title),
-            Some(Detail::Pull(pull)) => format!("#{}  {}", pull.number, pull.title),
-            Some(Detail::Run(run)) => format!("{}  #{}", run.workflow_name, run.database_id),
+            Some(Detail::Issue(issue)) => (format!("#{}", issue.number), issue.title.clone()),
+            Some(Detail::Pull(pull)) => (format!("#{}", pull.number), pull.title.clone()),
+            Some(Detail::Run(run)) => (format!("#{}", run.database_id), run.workflow_name.clone()),
             None => match self.resource {
-                DetailResource::Issue(number) => format!("Issue #{number}"),
-                DetailResource::Pull(number) => format!("Pull Request #{number}"),
-                DetailResource::Run(id) => format!("Actions Run #{id}"),
+                DetailResource::Issue(number) => (format!("#{number}"), "Issue".into()),
+                DetailResource::Pull(number) => (format!("#{number}"), "Pull Request".into()),
+                DetailResource::Run(id) => (format!("#{id}"), "Actions Run".into()),
             },
         }
     }
@@ -823,26 +946,35 @@ impl DetailApp {
         }
     }
 
-    fn build_lines(&self, width: u16, palette: &Palette) -> Vec<Line<'static>> {
+    fn build_lines(
+        &self,
+        width: u16,
+        palette: &Palette,
+    ) -> (Vec<Line<'static>>, Vec<ImagePlacement>) {
         let width = usize::from(width.max(8));
         if let Some(error) = &self.error {
-            return styled_text(error, width, Style::default().fg(palette.red));
+            return (
+                styled_text(error, width, Style::default().fg(palette.red)),
+                Vec::new(),
+            );
         }
         let Some(detail) = &self.detail else {
-            return vec![Line::styled(
-                "Loading…",
-                Style::default().fg(palette.accent),
-            )];
+            return (
+                vec![Line::styled(
+                    "Loading…",
+                    Style::default().fg(palette.accent),
+                )],
+                Vec::new(),
+            );
         };
+        let plain = |lines: Vec<Line<'static>>| (lines, Vec::new());
         match (detail, self.active_tab()) {
-            (Detail::Issue(issue), Tab::Overview) => issue_overview(issue, width, palette),
-            (Detail::Issue(issue), Tab::Conversation) => {
-                comments_lines(&issue.comments, width, palette)
+            (Detail::Issue(issue), _) => issue_page(issue, width, palette, self.images_enabled),
+            (Detail::Pull(pull), Tab::Conversation) => {
+                pull_page(pull, width, palette, self.images_enabled)
             }
-            (Detail::Pull(pull), Tab::Overview) => pull_overview(pull, width, palette),
-            (Detail::Pull(pull), Tab::Conversation) => pull_conversation(pull, width, palette),
-            (Detail::Pull(pull), Tab::Files) => pull_files(pull, palette),
-            (Detail::Pull(_), Tab::Diff) => {
+            (Detail::Pull(pull), Tab::Files) => plain(pull_files(pull, palette)),
+            (Detail::Pull(_), Tab::Diff) => plain({
                 if let Some(error) = &self.patch_error {
                     styled_text(error, width, Style::default().fg(palette.red))
                 } else {
@@ -856,11 +988,13 @@ impl DetailApp {
                         |patch| patch_lines(patch, width, palette),
                     )
                 }
+            }),
+            (Detail::Pull(pull), Tab::Checks) => {
+                plain(check_lines(&pull.status_check_rollup, palette))
             }
-            (Detail::Pull(pull), Tab::Checks) => check_lines(&pull.status_check_rollup, palette),
-            (Detail::Run(run), Tab::Overview) => run_overview(run, width, palette),
-            (Detail::Run(run), Tab::Jobs) => run_jobs(run, palette),
-            (Detail::Run(_), Tab::Log) => {
+            (Detail::Run(run), Tab::Overview) => plain(run_overview(run, width, palette)),
+            (Detail::Run(run), Tab::Jobs) => plain(run_jobs(run, palette)),
+            (Detail::Run(_), Tab::Log) => plain({
                 if let Some(error) = &self.log_error {
                     styled_text(error, width, Style::default().fg(palette.red))
                 } else {
@@ -874,11 +1008,11 @@ impl DetailApp {
                         |(log, _)| log_lines(log, width, palette),
                     )
                 }
-            }
-            _ => vec![Line::styled(
+            }),
+            _ => plain(vec![Line::styled(
                 "Not available",
                 Style::default().fg(palette.overlay1),
-            )],
+            )]),
         }
     }
 
@@ -887,30 +1021,61 @@ impl DetailApp {
         if area.height == 0 {
             return 0;
         }
-        let title_width = area.width.saturating_sub(14);
+        // Badge-style header: number pill + title, state pill on the right.
+        let (number, title) = self.title_parts();
+        let number_badge = format!(" {number} ");
+        let state = self.state().to_ascii_uppercase();
+        let state_badge = format!(" {state} ");
+        let number_width = (number_badge.chars().count() as u16).min(area.width);
+        let state_width =
+            (state_badge.chars().count() as u16).min(area.width.saturating_sub(number_width));
+        let title_width = area
+            .width
+            .saturating_sub(number_width.saturating_add(state_width).saturating_add(1));
         frame.render_widget(
-            Paragraph::new(self.title()).style(
+            Paragraph::new(number_badge).style(
                 Style::default()
-                    .fg(palette.text)
+                    .fg(palette.panel_bg)
+                    .bg(palette.accent)
                     .add_modifier(Modifier::BOLD),
             ),
             Rect {
-                width: title_width,
+                width: number_width,
                 height: 1,
                 ..area
             },
         );
-        frame.render_widget(
-            Paragraph::new(format!(" {} ", self.state().to_ascii_uppercase()))
-                .alignment(ratatui::layout::Alignment::Right)
-                .style(Style::default().fg(state_color(self.state(), palette))),
-            Rect {
-                x: area.x + title_width,
-                width: area.width.saturating_sub(title_width),
-                height: 1,
-                ..area
-            },
-        );
+        if title_width > 0 {
+            frame.render_widget(
+                Paragraph::new(format!(" {title}")).style(
+                    Style::default()
+                        .fg(palette.text)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Rect {
+                    x: area.x + number_width,
+                    width: title_width,
+                    height: 1,
+                    ..area
+                },
+            );
+        }
+        if state_width > 0 {
+            frame.render_widget(
+                Paragraph::new(state_badge).style(
+                    Style::default()
+                        .fg(palette.panel_bg)
+                        .bg(state_color(self.state(), palette))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Rect {
+                    x: area.x + area.width.saturating_sub(state_width),
+                    width: state_width,
+                    height: 1,
+                    ..area
+                },
+            );
+        }
 
         if area.height < 2 {
             return 0;
@@ -948,7 +1113,9 @@ impl DetailApp {
         self.body_height = body.height;
         let render_key = (self.active_tab(), body.width, self.content_revision);
         if self.rendered_key != Some(render_key) {
-            self.rendered_lines = self.build_lines(body.width, palette);
+            let (lines, images) = self.build_lines(body.width, palette);
+            self.rendered_lines = lines;
+            self.images = images;
             self.rendered_key = Some(render_key);
         }
         let max_scroll = self
@@ -966,6 +1133,7 @@ impl DetailApp {
             ),
             body,
         );
+        self.render_images(frame, body);
 
         if footer_height == 1 {
             let hints = if self.mutation_loading {
@@ -1200,14 +1368,9 @@ impl Drop for DetailTerminal {
 
 fn tabs_for(resource: DetailResource) -> &'static [Tab] {
     match resource {
-        DetailResource::Issue(_) => &[Tab::Overview, Tab::Conversation],
-        DetailResource::Pull(_) => &[
-            Tab::Overview,
-            Tab::Conversation,
-            Tab::Files,
-            Tab::Diff,
-            Tab::Checks,
-        ],
+        // Issue/PR overview and comments now live on one scrollable page.
+        DetailResource::Issue(_) => &[Tab::Conversation],
+        DetailResource::Pull(_) => &[Tab::Conversation, Tab::Files, Tab::Diff, Tab::Checks],
         DetailResource::Run(_) => &[Tab::Overview, Tab::Jobs, Tab::Log],
     }
 }
@@ -1233,45 +1396,363 @@ fn styled_text(text: &str, width: usize, style: Style) -> Vec<Line<'static>> {
         .collect()
 }
 
-fn body_lines(text: &str, width: usize, palette: &Palette) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
-    let mut code = false;
-    for raw in text.lines() {
-        if raw.trim_start().starts_with("```") {
-            code = !code;
-            lines.push(Line::styled(
-                raw.to_string(),
-                Style::default().fg(palette.yellow),
-            ));
-            continue;
+/// Fetch and decode a remote image. Best-effort; bounded size and default
+/// ureq timeouts keep a bad URL from stalling the client.
+fn fetch_image(url: &str) -> Result<image::DynamicImage, String> {
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err("unsupported image url".into());
+    }
+    let mut response = ureq::get(url).call().map_err(|error| error.to_string())?;
+    let mut bytes = Vec::new();
+    response
+        .body_mut()
+        .as_reader()
+        .take(MAX_IMAGE_BYTES as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    image::load_from_memory(&bytes).map_err(|error| error.to_string())
+}
+
+/// A rendered page: styled lines plus any image placements (by line index).
+struct Page {
+    lines: Vec<Line<'static>>,
+    images: Vec<ImagePlacement>,
+}
+
+impl Page {
+    fn new() -> Self {
+        Self {
+            lines: Vec::new(),
+            images: Vec::new(),
         }
-        let style = if code {
-            Style::default().fg(palette.yellow).bg(palette.surface0)
-        } else if raw.starts_with('#') {
-            Style::default()
+    }
+
+    fn blank(&mut self) {
+        self.lines.push(Line::raw(String::new()));
+    }
+
+    fn push(&mut self, line: Line<'static>) {
+        self.lines.push(line);
+    }
+
+    fn rule(&mut self, width: usize, palette: &Palette) {
+        self.lines.push(Line::styled(
+            "─".repeat(width),
+            Style::default().fg(palette.surface1),
+        ));
+    }
+
+    fn markdown(&mut self, text: &str, width: usize, palette: &Palette, images_enabled: bool) {
+        let (lines, images) = render_markdown(text, width, palette, images_enabled);
+        let base = self.lines.len();
+        let rows = image_rows();
+        for (offset, url) in images {
+            self.images.push(ImagePlacement {
+                line: base + offset,
+                url,
+                rows,
+            });
+        }
+        self.lines.extend(lines);
+    }
+
+    fn into_parts(self) -> (Vec<Line<'static>>, Vec<ImagePlacement>) {
+        (self.lines, self.images)
+    }
+}
+
+/// Markdown → styled ratatui lines using pulldown-cmark for parsing. Returns
+/// the lines and `(line_index, url)` for any images (as reserved blank rows).
+fn render_markdown(
+    text: &str,
+    width: usize,
+    palette: &Palette,
+    images_enabled: bool,
+) -> (Vec<Line<'static>>, Vec<(usize, String)>) {
+    if text.trim().is_empty() {
+        return (
+            vec![Line::styled(
+                "(no description)",
+                Style::default().fg(palette.overlay1),
+            )],
+            Vec::new(),
+        );
+    }
+    let rows = usize::from(image_rows());
+    let mut out: Vec<Line<'static>> = Vec::new();
+    let mut images: Vec<(usize, String)> = Vec::new();
+    let mut segs: Vec<(String, Style)> = Vec::new();
+    let (mut bold, mut italic, mut strike, mut link) = (false, false, false, false);
+    let mut heading: Option<HeadingLevel> = None;
+    let mut quote_depth: usize = 0;
+    let mut in_code = false;
+    let mut list_stack: Vec<Option<u64>> = Vec::new();
+    let mut item_pending_marker: Option<String> = None;
+    let mut image_url: Option<String> = None;
+
+    let seg_style = |bold: bool,
+                     italic: bool,
+                     strike: bool,
+                     link: bool,
+                     heading: Option<HeadingLevel>,
+                     quote: usize| {
+        if let Some(_level) = heading {
+            return Style::default()
                 .fg(palette.accent)
-                .add_modifier(Modifier::BOLD)
-        } else if raw.starts_with('>') {
+                .add_modifier(Modifier::BOLD);
+        }
+        let mut style = if quote > 0 {
             Style::default()
                 .fg(palette.subtext0)
                 .add_modifier(Modifier::ITALIC)
         } else {
             Style::default().fg(palette.text)
         };
-        let wrapped = wrap_text(raw, width);
-        if wrapped.is_empty() {
-            lines.push(Line::raw(String::new()));
-        } else {
-            lines.extend(wrapped.into_iter().map(|line| Line::styled(line, style)));
+        if bold {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        if italic {
+            style = style.add_modifier(Modifier::ITALIC);
+        }
+        if strike {
+            style = style.add_modifier(Modifier::CROSSED_OUT);
+        }
+        if link {
+            style = style.fg(palette.blue).add_modifier(Modifier::UNDERLINED);
+        }
+        style
+    };
+
+    let quote_prefix = |depth: usize| "▏ ".repeat(depth);
+
+    let parser = Parser::new_ext(
+        text,
+        Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS,
+    );
+    for event in parser {
+        match event {
+            MdEvent::Start(Tag::Paragraph | Tag::Heading { .. }) => {
+                if let Tag::Heading { level, .. } = event_heading(&event) {
+                    heading = Some(level);
+                }
+                segs.clear();
+            }
+            MdEvent::End(TagEnd::Paragraph | TagEnd::Heading(_)) => {
+                let prefix = quote_prefix(quote_depth);
+                let first = item_pending_marker.take();
+                flush_block(
+                    &mut out,
+                    &mut segs,
+                    width,
+                    &prefix,
+                    first.as_deref(),
+                    palette,
+                );
+                heading = None;
+                out.push(Line::raw(String::new()));
+            }
+            MdEvent::Start(Tag::Strong) => bold = true,
+            MdEvent::End(TagEnd::Strong) => bold = false,
+            MdEvent::Start(Tag::Emphasis) => italic = true,
+            MdEvent::End(TagEnd::Emphasis) => italic = false,
+            MdEvent::Start(Tag::Strikethrough) => strike = true,
+            MdEvent::End(TagEnd::Strikethrough) => strike = false,
+            MdEvent::Start(Tag::Link { .. }) => link = true,
+            MdEvent::End(TagEnd::Link) => link = false,
+            MdEvent::Start(Tag::BlockQuote(_)) => quote_depth += 1,
+            MdEvent::End(TagEnd::BlockQuote(_)) => quote_depth = quote_depth.saturating_sub(1),
+            MdEvent::Start(Tag::List(start)) => list_stack.push(start),
+            MdEvent::End(TagEnd::List(_)) => {
+                list_stack.pop();
+            }
+            MdEvent::Start(Tag::Item) => {
+                let marker = match list_stack.last_mut() {
+                    Some(Some(n)) => {
+                        let marker = format!("{n}. ");
+                        *n += 1;
+                        marker
+                    }
+                    _ => "• ".to_string(),
+                };
+                item_pending_marker = Some(marker);
+                segs.clear();
+            }
+            MdEvent::End(TagEnd::Item) => {
+                let prefix = quote_prefix(quote_depth);
+                let first = item_pending_marker.take();
+                flush_block(
+                    &mut out,
+                    &mut segs,
+                    width,
+                    &prefix,
+                    first.as_deref(),
+                    palette,
+                );
+            }
+            MdEvent::Start(Tag::CodeBlock(_)) => {
+                flush_block(&mut out, &mut segs, width, "", None, palette);
+                in_code = true;
+            }
+            MdEvent::End(TagEnd::CodeBlock) => {
+                in_code = false;
+                out.push(Line::raw(String::new()));
+            }
+            MdEvent::Start(Tag::Image { dest_url, .. }) => {
+                image_url = Some(dest_url.to_string());
+                segs.clear();
+            }
+            MdEvent::End(TagEnd::Image) => {
+                let alt: String = std::mem::take(&mut segs)
+                    .into_iter()
+                    .map(|(text, _)| text)
+                    .collect();
+                if let Some(url) = image_url.take() {
+                    flush_block(&mut out, &mut segs, width, "", None, palette);
+                    if images_enabled {
+                        images.push((out.len(), url));
+                        for _ in 0..rows {
+                            out.push(Line::raw(String::new()));
+                        }
+                    } else {
+                        let label = if alt.trim().is_empty() {
+                            "image"
+                        } else {
+                            alt.trim()
+                        };
+                        out.push(Line::styled(
+                            format!("⬜ {label}  ({url})"),
+                            Style::default().fg(palette.overlay1),
+                        ));
+                    }
+                }
+            }
+            MdEvent::Text(text) => {
+                if in_code {
+                    for line in text.lines() {
+                        out.push(Line::styled(
+                            format!("  {line}"),
+                            Style::default().fg(palette.yellow).bg(palette.surface0),
+                        ));
+                    }
+                } else {
+                    segs.push((
+                        text.to_string(),
+                        seg_style(bold, italic, strike, link, heading, quote_depth),
+                    ));
+                }
+            }
+            MdEvent::Code(code) => segs.push((
+                code.to_string(),
+                Style::default().fg(palette.yellow).bg(palette.surface0),
+            )),
+            MdEvent::SoftBreak | MdEvent::HardBreak => {
+                segs.push((" ".to_string(), Style::default()))
+            }
+            MdEvent::Rule => {
+                flush_block(&mut out, &mut segs, width, "", None, palette);
+                out.push(Line::styled(
+                    "─".repeat(width),
+                    Style::default().fg(palette.surface1),
+                ));
+            }
+            MdEvent::TaskListMarker(done) => segs.push((
+                if done { "[x] ".into() } else { "[ ] ".into() },
+                Style::default().fg(palette.accent),
+            )),
+            _ => {}
         }
     }
-    if text.is_empty() {
-        lines.push(Line::styled(
-            "(no description)",
-            Style::default().fg(palette.overlay1),
-        ));
+    flush_block(&mut out, &mut segs, width, "", None, palette);
+    while out.last().is_some_and(|line| line.width() == 0) {
+        out.pop();
     }
-    lines
+    (out, images)
+}
+
+fn event_heading(event: &MdEvent) -> Tag<'static> {
+    if let MdEvent::Start(Tag::Heading { level, .. }) = event {
+        Tag::Heading {
+            level: *level,
+            id: None,
+            classes: Vec::new(),
+            attrs: Vec::new(),
+        }
+    } else {
+        Tag::Paragraph
+    }
+}
+
+/// Wrap styled segments into lines, applying a first-line marker + continuation
+/// indent so list bullets and blockquote bars align.
+fn flush_block(
+    out: &mut Vec<Line<'static>>,
+    segs: &mut Vec<(String, Style)>,
+    width: usize,
+    prefix: &str,
+    first_marker: Option<&str>,
+    palette: &Palette,
+) {
+    if segs.is_empty() {
+        return;
+    }
+    let marker = first_marker.unwrap_or("");
+    let cont_indent = " ".repeat(marker.chars().count());
+    let prefix_style = Style::default().fg(palette.overlay1);
+    let avail = width
+        .saturating_sub(prefix.chars().count() + marker.chars().count())
+        .max(1);
+
+    // Split segments into styled words.
+    let mut words: Vec<(String, Style)> = Vec::new();
+    for (text, style) in segs.drain(..) {
+        let mut first = true;
+        for word in text.split(' ') {
+            if word.is_empty() {
+                continue;
+            }
+            let _ = first;
+            first = false;
+            words.push((word.to_string(), style));
+        }
+    }
+    if words.is_empty() {
+        return;
+    }
+
+    let mut rows: Vec<Vec<Span<'static>>> = Vec::new();
+    let mut current: Vec<Span<'static>> = Vec::new();
+    let mut used = 0usize;
+    for (word, style) in words {
+        let word_len = word.chars().count();
+        let extra = usize::from(!current.is_empty()) + word_len;
+        if !current.is_empty() && used + extra > avail {
+            rows.push(std::mem::take(&mut current));
+            used = 0;
+        }
+        if !current.is_empty() {
+            current.push(Span::raw(" "));
+            used += 1;
+        }
+        current.push(Span::styled(word, style));
+        used += word_len;
+    }
+    if !current.is_empty() {
+        rows.push(current);
+    }
+
+    for (index, mut spans) in rows.into_iter().enumerate() {
+        let mut line_spans = Vec::new();
+        if !prefix.is_empty() {
+            line_spans.push(Span::styled(prefix.to_string(), prefix_style));
+        }
+        if index == 0 && !marker.is_empty() {
+            line_spans.push(Span::styled(marker.to_string(), prefix_style));
+        } else if !cont_indent.is_empty() {
+            line_spans.push(Span::raw(cont_indent.clone()));
+        }
+        line_spans.append(&mut spans);
+        out.push(Line::from(line_spans));
+    }
 }
 
 fn wrap_text(text: &str, width: usize) -> Vec<String> {
@@ -1307,14 +1788,36 @@ fn metadata_line(parts: &[String], palette: &Palette) -> Line<'static> {
     Line::styled(parts.join("  ·  "), Style::default().fg(palette.subtext0))
 }
 
-fn issue_overview(issue: &IssueDetail, width: usize, palette: &Palette) -> Vec<Line<'static>> {
+fn comment_header(login: &str, timestamp: &str, palette: &Palette) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            login.to_string(),
+            Style::default()
+                .fg(palette.text)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("  ·  {timestamp}"),
+            Style::default().fg(palette.subtext0),
+        ),
+    ])
+}
+
+/// Issue overview + all comments on one scrollable page.
+fn issue_page(
+    issue: &IssueDetail,
+    width: usize,
+    palette: &Palette,
+    images_enabled: bool,
+) -> (Vec<Line<'static>>, Vec<ImagePlacement>) {
     let labels = issue
         .labels
         .iter()
         .map(|label| label.name.as_str())
         .collect::<Vec<_>>()
         .join(", ");
-    let mut lines = vec![metadata_line(
+    let mut page = Page::new();
+    page.push(metadata_line(
         &[
             actor(issue.author.as_ref()).to_string(),
             if labels.is_empty() {
@@ -1325,43 +1828,32 @@ fn issue_overview(issue: &IssueDetail, width: usize, palette: &Palette) -> Vec<L
             issue.updated_at.clone(),
         ],
         palette,
-    )];
-    lines.push(Line::raw(String::new()));
-    lines.extend(body_lines(&issue.body, width, palette));
-    lines
-}
-
-fn comments_lines(comments: &[Comment], width: usize, palette: &Palette) -> Vec<Line<'static>> {
-    if comments.is_empty() {
-        return vec![Line::styled(
-            "No comments",
-            Style::default().fg(palette.overlay1),
-        )];
-    }
-    let mut lines = Vec::new();
-    for (index, comment) in comments.iter().enumerate() {
-        if index > 0 {
-            lines.push(Line::styled(
-                "─".repeat(width),
-                Style::default().fg(palette.surface1),
-            ));
-        }
-        lines.push(metadata_line(
-            &[
-                actor(comment.author.as_ref()).to_string(),
-                comment.created_at.clone(),
-            ],
+    ));
+    page.blank();
+    page.markdown(&issue.body, width, palette, images_enabled);
+    for comment in &issue.comments {
+        page.blank();
+        page.rule(width, palette);
+        page.push(comment_header(
+            actor(comment.author.as_ref()),
+            &comment.created_at,
             palette,
         ));
-        lines.push(Line::raw(String::new()));
-        lines.extend(body_lines(&comment.body, width, palette));
-        lines.push(Line::raw(String::new()));
+        page.blank();
+        page.markdown(&comment.body, width, palette, images_enabled);
     }
-    lines
+    page.into_parts()
 }
 
-fn pull_overview(pull: &PullRequestDetail, width: usize, palette: &Palette) -> Vec<Line<'static>> {
-    let mut lines = vec![metadata_line(
+/// PR overview + conversation + reviews on one scrollable page.
+fn pull_page(
+    pull: &PullRequestDetail,
+    width: usize,
+    palette: &Palette,
+    images_enabled: bool,
+) -> (Vec<Line<'static>>, Vec<ImagePlacement>) {
+    let mut page = Page::new();
+    page.push(metadata_line(
         &[
             actor(pull.author.as_ref()).to_string(),
             format!("{} → {}", pull.head_ref_name, pull.base_ref_name),
@@ -1369,8 +1861,8 @@ fn pull_overview(pull: &PullRequestDetail, width: usize, palette: &Palette) -> V
             format!("{} files", pull.changed_files),
         ],
         palette,
-    )];
-    lines.push(metadata_line(
+    ));
+    page.push(metadata_line(
         &[
             format!("review {}", display_or(&pull.review_decision, "pending")),
             format!("merge {}", display_or(&pull.mergeable, "unknown")),
@@ -1378,32 +1870,29 @@ fn pull_overview(pull: &PullRequestDetail, width: usize, palette: &Palette) -> V
         ],
         palette,
     ));
-    lines.push(Line::raw(String::new()));
-    lines.extend(body_lines(&pull.body, width, palette));
-    lines
-}
-
-fn pull_conversation(
-    pull: &PullRequestDetail,
-    width: usize,
-    palette: &Palette,
-) -> Vec<Line<'static>> {
-    let mut lines = comments_lines(&pull.comments, width, palette);
-    for review in &pull.reviews {
-        if !lines.is_empty() {
-            lines.push(Line::styled(
-                "─".repeat(width),
-                Style::default().fg(palette.surface1),
-            ));
-        }
-        lines.push(review_header(review, palette));
-        if !review.body.is_empty() {
-            lines.push(Line::raw(String::new()));
-            lines.extend(body_lines(&review.body, width, palette));
-        }
-        lines.push(Line::raw(String::new()));
+    page.blank();
+    page.markdown(&pull.body, width, palette, images_enabled);
+    for comment in &pull.comments {
+        page.blank();
+        page.rule(width, palette);
+        page.push(comment_header(
+            actor(comment.author.as_ref()),
+            &comment.created_at,
+            palette,
+        ));
+        page.blank();
+        page.markdown(&comment.body, width, palette, images_enabled);
     }
-    lines
+    for review in &pull.reviews {
+        page.blank();
+        page.rule(width, palette);
+        page.push(review_header(review, palette));
+        if !review.body.is_empty() {
+            page.blank();
+            page.markdown(&review.body, width, palette, images_enabled);
+        }
+    }
+    page.into_parts()
 }
 
 fn review_header(review: &Review, palette: &Palette) -> Line<'static> {
@@ -1720,24 +2209,51 @@ mod tests {
 
     #[test]
     fn resource_tabs_are_context_specific() {
-        assert_eq!(
-            tabs_for(DetailResource::Issue(1)),
-            &[Tab::Overview, Tab::Conversation]
-        );
+        // Issue/PR overview and comments now share one Conversation page.
+        assert_eq!(tabs_for(DetailResource::Issue(1)), &[Tab::Conversation]);
         assert_eq!(
             tabs_for(DetailResource::Pull(2)),
-            &[
-                Tab::Overview,
-                Tab::Conversation,
-                Tab::Files,
-                Tab::Diff,
-                Tab::Checks,
-            ]
+            &[Tab::Conversation, Tab::Files, Tab::Diff, Tab::Checks]
         );
         assert_eq!(
             tabs_for(DetailResource::Run(3)),
             &[Tab::Overview, Tab::Jobs, Tab::Log]
         );
+    }
+
+    #[test]
+    fn markdown_renders_headings_lists_and_extracts_images() {
+        let palette = Palette::resolve();
+        let (lines, images) = render_markdown(
+            "# Title\n\nsome **bold** text\n\n- one\n- two\n\n![alt](https://example.test/a.png)",
+            60,
+            &palette,
+            true,
+        );
+        assert!(lines
+            .iter()
+            .any(|line| line.spans.iter().any(|span| span.content.contains("Title"))));
+        assert!(lines
+            .iter()
+            .any(|line| line.spans.iter().any(|span| span.content.contains('•'))));
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].1, "https://example.test/a.png");
+    }
+
+    #[test]
+    fn images_off_keeps_a_textual_placeholder_and_no_placements() {
+        let palette = Palette::resolve();
+        let (lines, images) = render_markdown(
+            "![diagram](https://example.test/x.png)",
+            60,
+            &palette,
+            false,
+        );
+        assert!(images.is_empty());
+        assert!(lines.iter().any(|line| line
+            .spans
+            .iter()
+            .any(|span| span.content.contains("diagram"))));
     }
 
     #[test]

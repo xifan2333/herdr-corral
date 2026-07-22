@@ -16,13 +16,13 @@
 //! trailing slack cell inside each chip so widths stay even and icons look
 //! centered (again matching herdr-sidebar).
 
-use crate::feature::Feature;
 use super::theme::Palette;
-use ratatui::Frame;
+use crate::feature::Feature;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
+use ratatui::Frame;
 
 /// One activity-bar item to render.
 #[derive(Clone, Copy, Debug)]
@@ -109,13 +109,11 @@ pub fn draw_activity(
         if chip_w > 0 {
             // fg = chip color, terminal default bg → caps read as chip extensions.
             frame.render_widget(
-                Paragraph::new("▄".repeat(usize::from(chip_w)))
-                    .style(Style::default().fg(chip_bg)),
+                Paragraph::new("▄".repeat(usize::from(chip_w))).style(Style::default().fg(chip_bg)),
                 Rect::new(*start, outer_top, chip_w, 1),
             );
             frame.render_widget(
-                Paragraph::new("▀".repeat(usize::from(chip_w)))
-                    .style(Style::default().fg(chip_bg)),
+                Paragraph::new("▀".repeat(usize::from(chip_w))).style(Style::default().fg(chip_bg)),
                 Rect::new(*start, outer_bottom, chip_w, 1),
             );
         }

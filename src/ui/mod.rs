@@ -8,6 +8,6 @@ pub mod icons;
 pub mod layout;
 pub mod theme;
 
-pub use activity::{ActivityBar, ActivityItem, draw_activity, hit};
-pub use icons::{NerdFontSupport, detect as detect_nerd_font, has_nerd_font};
+pub use activity::{draw_activity, hit, ActivityBar, ActivityItem};
+pub use icons::{detect as detect_nerd_font, has_nerd_font, NerdFontSupport};
 pub use theme::Palette;
