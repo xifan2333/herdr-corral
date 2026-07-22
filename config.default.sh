@@ -5,7 +5,7 @@
 #   standalone: ${XDG_CONFIG_HOME:-~/.config}/corral/config.sh
 # Edit THAT file — no recompile needed. Future migrations use this in-place
 # version and preserve customized bindings/functions.
-CORRAL_CONFIG_VERSION=7
+CORRAL_CONFIG_VERSION=9
 #
 # River-style: call `corral bind <key> <action>` (like `riverctl map …`).
 #   global actions: quit feature-explorer feature-scm feature-github
@@ -18,6 +18,9 @@ CORRAL_CONFIG_VERSION=7
 #   GitHub:         github-issues github-pulls github-actions github-view
 #                   github-diff github-checks github-log github-log-failed
 #                   github-filter github-load-more github-cycle-state
+#   GitHub detail:  github-comment github-approve github-context-action
+#                   github-close-reopen github-merge github-rerun-failed
+#                   github-rerun-all github-submit github-confirm github-cancel
 #   text editing:   edit-backspace edit-delete edit-home edit-end
 #   any other action = a shell function of that name (defined below)
 #
@@ -80,6 +83,25 @@ corral bind github:s github-cycle-state
 corral bind github:tab github-next-section
 corral bind github:backtab github-prev-section
 corral bind github:esc github-filter-cancel
+
+corral bind github-detail:d github-diff
+corral bind github-detail:C github-checks
+corral bind github-detail:f github-log-failed
+corral bind github-detail:L github-log
+corral bind github-detail:tab github-next-section
+corral bind github-detail:backtab github-prev-section
+corral bind github-detail:c github-comment
+corral bind github-detail:a github-approve
+corral bind github-detail:x github-context-action
+corral bind github-detail:D github-close-reopen
+corral bind github-detail:m github-merge
+corral bind github-detail:R github-rerun-failed
+corral bind github-detail:A github-rerun-all
+corral bind github-detail:ctrl+enter github-submit
+corral bind github-detail:ctrl+s github-submit
+corral bind github-detail:y github-confirm
+corral bind github-detail:n github-cancel
+corral bind github-detail:esc github-cancel
 
 corral bind backspace edit-backspace
 corral bind delete edit-delete
@@ -294,7 +316,7 @@ _corral_run() {
   } >"$script" || { rm -f -- "$script"; return 1; }
   chmod 700 "$script" || { rm -f -- "$script"; return 1; }
   vim_path="$(printf '%s' "$script" | jq -Rs .)" || { rm -f -- "$script"; return 1; }
-  expr="execute('enew | setlocal nonumber norelativenumber signcolumn=no foldcolumn=0 | terminal ' . fnameescape($vim_path))"
+  expr="execute('if &buftype ==# ''terminal'' | bwipeout! | endif | enew | setlocal nonumber norelativenumber signcolumn=no foldcolumn=0 wrap | terminal ' . fnameescape($vim_path)) . execute('setlocal wrap') . execute('call winrestview({''leftcol'': 0})') . execute('startinsert')"
   if ! "$nvim" --server "$socket" --remote-expr "$expr" >/dev/null 2>&1; then
     rm -f -- "$script"
     return 1
@@ -501,6 +523,39 @@ github_preview() {
   fi
 }
 # CORRAL_MIGRATION_V6_FUNCTION_END
+
+# CORRAL_MIGRATION_V8_FUNCTION_BEGIN
+# Open the independent full-width GitHub client in the same owner-scoped nvim
+# terminal used by Explorer and SCM previews.
+github_detail() {
+  local kind="${CORRAL_GITHUB_KIND:-}" repo="${CORRAL_GITHUB_REPO:-}"
+  local number="${CORRAL_GITHUB_NUMBER:-}" run_id="${CORRAL_GITHUB_RUN_ID:-}"
+  local bin qbin qrepo resource id view cmd
+  [[ -n "$repo" ]] || return 1
+  bin=$(command -v corral-github 2>/dev/null || true)
+  [[ -n "$bin" ]] || { github_preview; return $?; }
+  case "$kind" in
+    issue) resource=issue; id=$number; view=overview ;;
+    pr) resource=pr; id=$number; view=overview ;;
+    diff) resource=pr; id=$number; view=diff ;;
+    checks) resource=pr; id=$number; view=checks ;;
+    run) resource=run; id=$run_id; view=overview ;;
+    log) resource=run; id=$run_id; view=log ;;
+    log-failed) resource=run; id=$run_id; view=log-failed ;;
+    *) return 1 ;;
+  esac
+  [[ "$id" =~ ^[0-9]+$ ]] || return 1
+  qbin=$(printf '%q' "$bin"); qrepo=$(printf '%q' "$repo")
+  printf -v cmd 'exec %s %s --repo %s %s --view %s' "$qbin" "$resource" "$qrepo" "$id" "$view"
+  if [[ -n "${HERDR_BIN_PATH:-}" && -n "${HERDR_ENV:-}" ]]; then
+    echo CORRAL_SUSPEND=0
+    _corral_run "$cmd"
+  else
+    echo CORRAL_SUSPEND=1
+    eval "$cmd"
+  fi
+}
+# CORRAL_MIGRATION_V8_FUNCTION_END
 
 # Optional intelligent commit-message provider. Corral appends one prompt
 # argument containing instructions, changed files, and the bounded Git diff.

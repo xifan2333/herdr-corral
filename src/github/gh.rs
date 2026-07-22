@@ -1,6 +1,9 @@
-use super::{GitHubAdapter, Issue, PullRequest, Repository, WorkflowRun};
+use super::{
+    GitHubAdapter, GitHubDetailAdapter, GitHubMutation, Issue, IssueDetail, PullRequest,
+    PullRequestDetail, Repository, WorkflowRun, WorkflowRunDetail,
+};
 use serde::Deserialize;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -10,6 +13,10 @@ const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const ISSUE_FIELDS: &str = "number,title,state,author,labels,updatedAt,url";
 const PR_FIELDS: &str = "number,title,state,isDraft,author,baseRefName,headRefName,headRefOid,reviewDecision,mergeable,mergeStateStatus,statusCheckRollup,updatedAt,url";
 const RUN_FIELDS: &str = "databaseId,workflowName,displayTitle,status,conclusion,headBranch,event,attempt,createdAt,updatedAt,url";
+const ISSUE_DETAIL_FIELDS: &str =
+    "number,title,state,author,labels,body,comments,createdAt,updatedAt,url";
+const PR_DETAIL_FIELDS: &str = "number,title,state,isDraft,author,body,comments,reviews,files,baseRefName,headRefName,headRefOid,reviewDecision,mergeable,mergeStateStatus,statusCheckRollup,additions,deletions,changedFiles,createdAt,updatedAt,url";
+const RUN_DETAIL_FIELDS: &str = "databaseId,workflowName,displayTitle,status,conclusion,headBranch,headSha,event,attempt,jobs,createdAt,startedAt,updatedAt,url";
 
 #[derive(Clone, Debug)]
 pub struct GhCli {
@@ -22,13 +29,21 @@ impl GhCli {
     }
 
     fn output(&self, args: &[String]) -> Result<Vec<u8>, String> {
+        self.output_with_input(args, None)
+    }
+
+    fn output_with_input(&self, args: &[String], input: Option<&str>) -> Result<Vec<u8>, String> {
         let mut child = Command::new("gh")
             .args(args)
             .current_dir(&self.cwd)
             .env("GH_PROMPT_DISABLED", "1")
             .env("GH_PAGER", "cat")
             .env("NO_COLOR", "1")
-            .stdin(Stdio::null())
+            .stdin(if input.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -38,6 +53,19 @@ impl GhCli {
                 }
                 _ => format!("could not run gh: {error}"),
             })?;
+
+        if let Some(input) = input {
+            let Some(mut stdin) = child.stdin.take() else {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("could not open gh stdin".into());
+            };
+            if let Err(error) = stdin.write_all(input.as_bytes()) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("could not write gh stdin: {error}"));
+            }
+        }
 
         // Drain both pipes while waiting; otherwise a large JSON response can
         // fill an OS pipe and prevent `gh` from ever reaching exit.
@@ -91,6 +119,11 @@ impl GhCli {
         let bytes = self.output(args)?;
         serde_json::from_slice(&bytes).map_err(|error| format!("invalid gh JSON: {error}"))
     }
+
+    fn text(&self, args: &[String]) -> Result<String, String> {
+        let bytes = self.output(args)?;
+        String::from_utf8(bytes).map_err(|error| format!("invalid gh text: {error}"))
+    }
 }
 
 #[derive(Deserialize)]
@@ -123,6 +156,180 @@ fn repository_from(raw: RepoJson) -> Result<Repository, String> {
         host,
         url: raw.url,
     })
+}
+
+impl GitHubDetailAdapter for GhCli {
+    fn issue_detail(&self, repo: &str, number: u64) -> Result<IssueDetail, String> {
+        self.json(&[
+            "issue".into(),
+            "view".into(),
+            number.to_string(),
+            "--repo".into(),
+            repo.into(),
+            "--json".into(),
+            ISSUE_DETAIL_FIELDS.into(),
+        ])
+    }
+
+    fn pull_detail(&self, repo: &str, number: u64) -> Result<PullRequestDetail, String> {
+        self.json(&[
+            "pr".into(),
+            "view".into(),
+            number.to_string(),
+            "--repo".into(),
+            repo.into(),
+            "--json".into(),
+            PR_DETAIL_FIELDS.into(),
+        ])
+    }
+
+    fn run_detail(&self, repo: &str, run_id: u64) -> Result<WorkflowRunDetail, String> {
+        self.json(&[
+            "run".into(),
+            "view".into(),
+            run_id.to_string(),
+            "--repo".into(),
+            repo.into(),
+            "--json".into(),
+            RUN_DETAIL_FIELDS.into(),
+        ])
+    }
+
+    fn pull_patch(&self, repo: &str, number: u64) -> Result<String, String> {
+        self.text(&[
+            "pr".into(),
+            "diff".into(),
+            number.to_string(),
+            "--repo".into(),
+            repo.into(),
+        ])
+    }
+
+    fn run_log(&self, repo: &str, run_id: u64, failed_only: bool) -> Result<String, String> {
+        let mut args = vec![
+            "run".into(),
+            "view".into(),
+            run_id.to_string(),
+            "--repo".into(),
+            repo.into(),
+        ];
+        args.push(if failed_only { "--log-failed" } else { "--log" }.into());
+        self.text(&args)
+    }
+
+    fn mutate(&self, repo: &str, mutation: &GitHubMutation) -> Result<String, String> {
+        let (args, input): (Vec<String>, Option<&str>) = match mutation {
+            GitHubMutation::IssueComment { number, body } => (
+                vec![
+                    "issue".into(),
+                    "comment".into(),
+                    number.to_string(),
+                    "--repo".into(),
+                    repo.into(),
+                    "--body-file".into(),
+                    "-".into(),
+                ],
+                Some(body),
+            ),
+            GitHubMutation::IssueState { number, open } => (
+                vec![
+                    "issue".into(),
+                    if *open { "reopen" } else { "close" }.into(),
+                    number.to_string(),
+                    "--repo".into(),
+                    repo.into(),
+                ],
+                None,
+            ),
+            GitHubMutation::PullComment { number, body } => (
+                vec![
+                    "pr".into(),
+                    "comment".into(),
+                    number.to_string(),
+                    "--repo".into(),
+                    repo.into(),
+                    "--body-file".into(),
+                    "-".into(),
+                ],
+                Some(body),
+            ),
+            GitHubMutation::PullApprove { number } => (
+                vec![
+                    "pr".into(),
+                    "review".into(),
+                    number.to_string(),
+                    "--repo".into(),
+                    repo.into(),
+                    "--approve".into(),
+                ],
+                None,
+            ),
+            GitHubMutation::PullRequestChanges { number, body } => (
+                vec![
+                    "pr".into(),
+                    "review".into(),
+                    number.to_string(),
+                    "--repo".into(),
+                    repo.into(),
+                    "--request-changes".into(),
+                    "--body-file".into(),
+                    "-".into(),
+                ],
+                Some(body),
+            ),
+            GitHubMutation::PullMergeSquash { number, head_sha } => (
+                vec![
+                    "pr".into(),
+                    "merge".into(),
+                    number.to_string(),
+                    "--repo".into(),
+                    repo.into(),
+                    "--squash".into(),
+                    "--match-head-commit".into(),
+                    head_sha.clone(),
+                ],
+                None,
+            ),
+            GitHubMutation::PullState { number, open } => (
+                vec![
+                    "pr".into(),
+                    if *open { "reopen" } else { "close" }.into(),
+                    number.to_string(),
+                    "--repo".into(),
+                    repo.into(),
+                ],
+                None,
+            ),
+            GitHubMutation::RunCancel { run_id } => (
+                vec![
+                    "run".into(),
+                    "cancel".into(),
+                    run_id.to_string(),
+                    "--repo".into(),
+                    repo.into(),
+                ],
+                None,
+            ),
+            GitHubMutation::RunRerun {
+                run_id,
+                failed_only,
+            } => {
+                let mut args = vec![
+                    "run".into(),
+                    "rerun".into(),
+                    run_id.to_string(),
+                    "--repo".into(),
+                    repo.into(),
+                ];
+                if *failed_only {
+                    args.push("--failed".into());
+                }
+                (args, None)
+            }
+        };
+        let output = self.output_with_input(&args, input)?;
+        Ok(String::from_utf8_lossy(&output).trim().to_string())
+    }
 }
 
 impl GitHubAdapter for GhCli {

@@ -63,11 +63,21 @@ SCM 默认使用 `corral-diff`；可在 `config.sh` 设置
 
 GitHub：依赖已登录的 [GitHub CLI](https://cli.github.com/) `gh`，不在 Corral
 内保存 token。Issues、Pull Requests、Actions 与 SCM 一样是可选择、可折叠的
-状态树 section，`i`/`p`/`a` 定位 section，`Enter` 或 `h`/`l` 折叠展开。
-条目使用 `Enter`/`o` 查看，PR 使用 `d` 查看 diff、`c` 查看 checks，Actions
-使用 `x`/`L` 查看失败/完整日志；`f` 本地过滤，`]` 加载更多，`s` 循环
-open/closed/merged/all 状态。网络请求全部在后台执行，进行中的 Actions 每 5 秒
-刷新。GitHub Enterprise 使用 `[HOST/]OWNER/REPO` selector。
+状态树 section，`i`/`p`/`a` 定位 section，`Enter` 或 `h`/`l` 折叠展开；`f`
+本地过滤，`]` 加载更多，`s` 循环 open/closed/merged/all 状态。
+
+`Enter` 在共享 nvim pane 启动独立的 `corral-github`：Issue 提供正文、comments、
+回复和 Close/Reopen；PR 提供 Conversation、Files、Diff、Checks、回复、Approve、
+Request Changes、安全 squash merge 和 Close/Reopen；Actions 提供 Summary、Jobs、
+logs、Cancel、Rerun Failed/All。所有网络和 mutation 均在后台运行，正文通过 stdin
+传给 `gh`，破坏性操作必须确认。GitHub Enterprise 使用
+`[HOST/]OWNER/REPO` selector。`corral-github` 也可独立运行：
+
+```bash
+corral-github issue --repo owner/repo 123
+corral-github pr --repo owner/repo 456 --view diff
+corral-github run --repo owner/repo 789 --view jobs
+```
 
 ## 模块
 
@@ -79,14 +89,15 @@ open/closed/merged/all 状态。网络请求全部在后台执行，进行中的
 | `feature` | Explorer / SCM / GitHub |
 | `git` | 仓库发现、status 解析、stage / unstage |
 | `github` | `gh` adapter、仓库身份和 typed models |
+| `github_detail` / `corral-github` | Issue / PR / Actions 全宽交互客户端 |
 | `diffview` / `corral-diff` | 独立主题化 diff 过滤器 |
 | `layout` | activity + body 几何 |
 | `app` | sidebar 事件循环 |
 
 ## 下一步
 
-1. GitHub 回复、Approve/Request Changes、Close/Reopen 和安全 Merge
-2. GitHub Actions Cancel/Rerun 与 Workflow Dispatch
-3. `config.sh` 版本迁移执行器与 editor pane/socket 回收
+1. GitHub merge method picker、review-thread 回复和 Workflow Dispatch
+2. GitHub Actions artifacts 下载
+3. editor pane/socket orphan 回收
 4. Explorer Change Folder
 5. SCM drawer destructive-action confirmation与自动 ensure / toggle

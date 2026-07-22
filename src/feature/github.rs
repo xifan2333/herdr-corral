@@ -745,7 +745,7 @@ impl GitHubView {
             _ => return KeyOutcome::Handled,
         }
         KeyOutcome::Shell {
-            action: "github_preview".into(),
+            action: "github_detail".into(),
             file: None,
             env,
         }
@@ -1081,7 +1081,7 @@ impl FeatureView for GitHubView {
     }
 
     fn on_shell_result(&mut self, action: &str, ok: bool) {
-        if action == "github_preview" && !ok {
+        if action == "github_detail" && !ok {
             self.set_notice("preview failed", true);
         }
     }
@@ -1409,7 +1409,7 @@ mod tests {
         let KeyOutcome::Shell { action, env, .. } = outcome else {
             panic!("expected preview action");
         };
-        assert_eq!(action, "github_preview");
+        assert_eq!(action, "github_detail");
         assert!(env.contains(&("CORRAL_GITHUB_KIND".into(), "issue".into())));
         assert!(env.contains(&("CORRAL_GITHUB_REPO".into(), "owner/repo".into())));
         assert!(env.contains(&("CORRAL_GITHUB_NUMBER".into(), "42".into())));
