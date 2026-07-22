@@ -9,7 +9,7 @@ mod model;
 pub use gh::GhCli;
 pub use model::{
     Actor, Comment, Issue, IssueDetail, PullFile, PullRequest, PullRequestDetail, Repository,
-    Review, WorkflowJob, WorkflowRun, WorkflowRunDetail, WorkflowStep,
+    Review, Workflow, WorkflowJob, WorkflowRun, WorkflowRunDetail, WorkflowStep,
 };
 
 /// Read-only GitHub operations used by the first GitHub feature slice.
@@ -98,6 +98,10 @@ pub enum GitHubMutation {
         run_id: u64,
         failed_only: bool,
     },
+    WorkflowDispatch {
+        workflow: String,
+        r#ref: String,
+    },
 }
 
 pub trait GitHubDetailAdapter: Send + Sync {
@@ -119,4 +123,11 @@ pub trait GitHubAdapter: Send + Sync {
         state: &str,
     ) -> Result<Vec<PullRequest>, String>;
     fn runs(&self, repo: &Repository, limit: usize) -> Result<Vec<WorkflowRun>, String>;
+    fn workflows(&self, repo: &Repository) -> Result<Vec<Workflow>, String>;
+    fn dispatch_workflow(
+        &self,
+        repo: &Repository,
+        workflow: &str,
+        r#ref: &str,
+    ) -> Result<String, String>;
 }

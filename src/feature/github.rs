@@ -6,7 +6,7 @@
 
 use super::view::{FeatureView, KeyOutcome};
 use crate::config::{self, Config};
-use crate::github::{GhCli, GitHubAdapter, Issue, PullRequest, Repository, WorkflowRun};
+use crate::github::{GhCli, GitHubAdapter, Issue, PullRequest, Repository, Workflow, WorkflowRun};
 use crate::ui::Palette;
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Alignment, Rect};
@@ -83,6 +83,7 @@ enum Row {
     Issue(usize),
     Pull(usize),
     Run(usize),
+    Workflow(usize),
     Status {
         section: Section,
         message: String,
@@ -96,7 +97,7 @@ impl Row {
             Row::Header { section, .. } | Row::Status { section, .. } => *section,
             Row::Issue(_) => Section::Issues,
             Row::Pull(_) => Section::Pulls,
-            Row::Run(_) => Section::Actions,
+            Row::Run(_) | Row::Workflow(_) => Section::Actions,
         }
     }
 
@@ -111,6 +112,7 @@ enum RowKey {
     Issue(u64),
     Pull(u64),
     Run(u64),
+    Workflow(u64),
 }
 
 enum Payload {
@@ -118,6 +120,8 @@ enum Payload {
     Issues(Vec<Issue>),
     Pulls(Vec<PullRequest>),
     Runs(Vec<WorkflowRun>),
+    Workflows(Vec<Workflow>),
+    Dispatch(String),
 }
 
 #[derive(Clone, Copy)]
@@ -126,12 +130,19 @@ enum LoadTarget {
     Issues,
     Pulls,
     Runs,
+    Workflows,
+    Dispatch,
 }
 
 struct Completion {
     generation: u64,
     target: LoadTarget,
     result: Result<Payload, String>,
+}
+
+struct PendingDispatch {
+    workflow: String,
+    r#ref: String,
 }
 
 struct FilterEdit {
@@ -149,6 +160,7 @@ pub struct GitHubView {
     issues: Collection<Issue>,
     pulls: Collection<PullRequest>,
     runs: Collection<WorkflowRun>,
+    workflows: Collection<Workflow>,
     collapsed: [bool; 3],
     issue_state: usize,
     pr_state: usize,
@@ -163,8 +175,11 @@ pub struct GitHubView {
     receiver: Receiver<Completion>,
     body_top: Cell<u16>,
     body_height: Cell<u16>,
-    notice: Option<(String, bool, Instant)>,
+    notice: Option<(String, bool)>,
+    notice_at: Option<Instant>,
     last_runs_refresh: Instant,
+    pending_dispatch: Option<PendingDispatch>,
+    dispatching: bool,
 }
 
 impl GitHubView {
@@ -185,6 +200,7 @@ impl GitHubView {
             issues: Collection::new(ISSUE_PAGE),
             pulls: Collection::new(PR_PAGE),
             runs: Collection::new(RUN_PAGE),
+            workflows: Collection::new(50),
             collapsed: [false; 3],
             issue_state: 0,
             pr_state: 0,
@@ -200,7 +216,10 @@ impl GitHubView {
             body_top: Cell::new(0),
             body_height: Cell::new(0),
             notice: None,
+            notice_at: None,
             last_runs_refresh: Instant::now(),
+            pending_dispatch: None,
+            dispatching: false,
         };
         view.rebuild_rows(None);
         view
@@ -279,19 +298,42 @@ impl GitHubView {
                     });
                 });
             }
-            Section::Actions if !self.runs.loading => {
-                self.runs.loading = true;
-                self.runs.error = None;
-                let limit = self.runs.limit;
-                self.last_runs_refresh = Instant::now();
-                std::thread::spawn(move || {
-                    let result = adapter.runs(&repo, limit).map(Payload::Runs);
-                    let _ = sender.send(Completion {
-                        generation,
-                        target: LoadTarget::Runs,
-                        result,
+            Section::Actions => {
+                if !self.runs.loading {
+                    self.runs.loading = true;
+                    self.runs.error = None;
+                    let limit = self.runs.limit;
+                    self.last_runs_refresh = Instant::now();
+                    let adapter = Arc::clone(&adapter);
+                    let repo = repo.clone();
+                    let sender = sender.clone();
+                    std::thread::spawn(move || {
+                        let result = adapter.runs(&repo, limit).map(Payload::Runs);
+                        let _ = sender.send(Completion {
+                            generation,
+                            target: LoadTarget::Runs,
+                            result,
+                        });
                     });
-                });
+                }
+                if !self.workflows.loading {
+                    self.workflows.loading = true;
+                    self.workflows.error = None;
+                    let adapter = Arc::clone(&adapter);
+                    let repo = repo.clone();
+                    let sender = sender.clone();
+                    std::thread::spawn(move || {
+                        let result = adapter.workflows(&repo).map(Payload::Workflows);
+                        let _ = sender.send(Completion {
+                            generation,
+                            target: LoadTarget::Workflows,
+                            result,
+                        });
+                    });
+                }
+                if !self.runs.loading && !self.workflows.loading {
+                    return;
+                }
             }
             _ => return,
         }
@@ -322,6 +364,7 @@ impl GitHubView {
                     self.issues.items.clear();
                     self.pulls.items.clear();
                     self.runs.items.clear();
+                    self.workflows.items.clear();
                 }
                 self.repo = Some(repo);
                 self.rebuild_rows(selected);
@@ -340,6 +383,26 @@ impl GitHubView {
                 self.runs.items = items;
                 self.runs.loading = false;
             }
+            Ok(Payload::Workflows(items)) => {
+                self.workflows.items = items
+                    .into_iter()
+                    .filter(|workflow| workflow.state.eq_ignore_ascii_case("active"))
+                    .collect();
+                self.workflows.loading = false;
+            }
+            Ok(Payload::Dispatch(message)) => {
+                self.dispatching = false;
+                self.set_notice(
+                    if message.is_empty() {
+                        "workflow dispatched".into()
+                    } else {
+                        message
+                    },
+                    false,
+                );
+                // Fresh runs usually take a moment to appear.
+                self.start_load(Section::Actions);
+            }
             Err(error) => match completion.target {
                 LoadTarget::Repository => {
                     self.repo_loading = false;
@@ -356,6 +419,14 @@ impl GitHubView {
                 LoadTarget::Runs => {
                     self.runs.loading = false;
                     self.runs.error = Some(error);
+                }
+                LoadTarget::Workflows => {
+                    self.workflows.loading = false;
+                    self.workflows.error = Some(error);
+                }
+                LoadTarget::Dispatch => {
+                    self.dispatching = false;
+                    self.set_notice(error, true);
                 }
             },
         }
@@ -421,11 +492,26 @@ impl GitHubView {
             .collect()
     }
 
+    fn workflow_indices(&self) -> Vec<usize> {
+        let needle = self.filters[Section::Actions.index()].to_ascii_lowercase();
+        self.workflows
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| {
+                needle.is_empty()
+                    || item.name.to_ascii_lowercase().contains(&needle)
+                    || item.path.to_ascii_lowercase().contains(&needle)
+            })
+            .map(|(index, _)| index)
+            .collect()
+    }
+
     fn section_count(&self, section: Section) -> usize {
         match section {
             Section::Issues => self.issue_indices().len(),
             Section::Pulls => self.pull_indices().len(),
-            Section::Actions => self.run_indices().len(),
+            Section::Actions => self.run_indices().len() + self.workflow_indices().len(),
         }
     }
 
@@ -433,7 +519,7 @@ impl GitHubView {
         match section {
             Section::Issues => self.issues.loading,
             Section::Pulls => self.pulls.loading,
-            Section::Actions => self.runs.loading,
+            Section::Actions => self.runs.loading || self.workflows.loading,
         }
     }
 
@@ -441,7 +527,11 @@ impl GitHubView {
         match section {
             Section::Issues => self.issues.error.as_deref(),
             Section::Pulls => self.pulls.error.as_deref(),
-            Section::Actions => self.runs.error.as_deref(),
+            Section::Actions => self
+                .runs
+                .error
+                .as_deref()
+                .or(self.workflows.error.as_deref()),
         }
     }
 
@@ -449,7 +539,7 @@ impl GitHubView {
         match section {
             Section::Issues => self.issues.items.is_empty(),
             Section::Pulls => self.pulls.items.is_empty(),
-            Section::Actions => self.runs.items.is_empty(),
+            Section::Actions => self.runs.items.is_empty() && self.workflows.items.is_empty(),
         }
     }
 
@@ -464,6 +554,7 @@ impl GitHubView {
             Row::Issue(index) => RowKey::Issue(self.issues.items.get(*index)?.number),
             Row::Pull(index) => RowKey::Pull(self.pulls.items.get(*index)?.number),
             Row::Run(index) => RowKey::Run(self.runs.items.get(*index)?.database_id),
+            Row::Workflow(index) => RowKey::Workflow(self.workflows.items.get(*index)?.id),
             Row::Status { .. } => return None,
         })
     }
@@ -474,6 +565,7 @@ impl GitHubView {
             Row::Issue(index) => RowKey::Issue(self.issues.items.get(*index)?.number),
             Row::Pull(index) => RowKey::Pull(self.pulls.items.get(*index)?.number),
             Row::Run(index) => RowKey::Run(self.runs.items.get(*index)?.database_id),
+            Row::Workflow(index) => RowKey::Workflow(self.workflows.items.get(*index)?.id),
             Row::Status { .. } => return None,
         })
     }
@@ -497,31 +589,72 @@ impl GitHubView {
                         error: true,
                     });
                 } else {
-                    let indices = match section {
-                        Section::Issues => self.issue_indices(),
-                        Section::Pulls => self.pull_indices(),
-                        Section::Actions => self.run_indices(),
-                    };
-                    if indices.is_empty() {
-                        let message = if self.repo_loading || self.section_loading(section) {
-                            "loading…"
-                        } else if self.section_empty(section) {
-                            "(empty)"
-                        } else {
-                            "no matches"
-                        };
-                        self.rows.push(Row::Status {
-                            section,
-                            message: message.into(),
-                            error: false,
-                        });
-                    } else {
-                        self.rows
-                            .extend(indices.into_iter().map(|index| match section {
-                                Section::Issues => Row::Issue(index),
-                                Section::Pulls => Row::Pull(index),
-                                Section::Actions => Row::Run(index),
-                            }));
+                    match section {
+                        Section::Issues | Section::Pulls => {
+                            let indices = match section {
+                                Section::Issues => self.issue_indices(),
+                                Section::Pulls => self.pull_indices(),
+                                Section::Actions => Vec::new(),
+                            };
+                            if indices.is_empty() {
+                                let message = if self.repo_loading || self.section_loading(section)
+                                {
+                                    "loading…"
+                                } else if self.section_empty(section) {
+                                    "(empty)"
+                                } else {
+                                    "no matches"
+                                };
+                                self.rows.push(Row::Status {
+                                    section,
+                                    message: message.into(),
+                                    error: false,
+                                });
+                            } else {
+                                self.rows
+                                    .extend(indices.into_iter().map(|index| match section {
+                                        Section::Issues => Row::Issue(index),
+                                        Section::Pulls => Row::Pull(index),
+                                        Section::Actions => unreachable!(),
+                                    }));
+                            }
+                        }
+                        Section::Actions => {
+                            let workflows = self.workflow_indices();
+                            let runs = self.run_indices();
+                            if workflows.is_empty() && runs.is_empty() {
+                                let message = if self.repo_loading || self.section_loading(section)
+                                {
+                                    "loading…"
+                                } else if self.section_empty(section) {
+                                    "(empty)"
+                                } else {
+                                    "no matches"
+                                };
+                                self.rows.push(Row::Status {
+                                    section,
+                                    message: message.into(),
+                                    error: false,
+                                });
+                            } else {
+                                if !workflows.is_empty() {
+                                    self.rows.push(Row::Status {
+                                        section,
+                                        message: "workflows".into(),
+                                        error: false,
+                                    });
+                                    self.rows.extend(workflows.into_iter().map(Row::Workflow));
+                                }
+                                if !runs.is_empty() {
+                                    self.rows.push(Row::Status {
+                                        section,
+                                        message: "recent runs".into(),
+                                        error: false,
+                                    });
+                                    self.rows.extend(runs.into_iter().map(Row::Run));
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -599,6 +732,7 @@ impl GitHubView {
                 KeyOutcome::Handled
             }
             Some(Row::Issue(_) | Row::Pull(_) | Row::Run(_)) => self.view_selected(),
+            Some(Row::Workflow(_)) => self.request_dispatch(),
             _ => KeyOutcome::Handled,
         }
     }
@@ -670,6 +804,87 @@ impl GitHubView {
             Section::Actions => self.runs.limit += RUN_PAGE,
         }
         self.start_load(section);
+    }
+
+    fn selected_workflow(&self) -> Option<&Workflow> {
+        match self.selected_row() {
+            Some(Row::Workflow(index)) => self.workflows.items.get(*index),
+            _ => None,
+        }
+    }
+
+    fn request_dispatch(&mut self) -> KeyOutcome {
+        if self.dispatching {
+            return KeyOutcome::Handled;
+        }
+        let Some(repo) = self.repo.as_ref() else {
+            return KeyOutcome::Handled;
+        };
+        let Some(workflow) = self.selected_workflow() else {
+            self.set_notice("select a workflow to dispatch", true);
+            return KeyOutcome::Handled;
+        };
+        if !workflow.state.eq_ignore_ascii_case("active") {
+            self.set_notice("only active workflows can be dispatched", true);
+            return KeyOutcome::Handled;
+        }
+        let workflow_id = if workflow.path.is_empty() {
+            workflow.id.to_string()
+        } else {
+            workflow.path.clone()
+        };
+        let r#ref = if repo.default_branch.is_empty() {
+            "main".into()
+        } else {
+            repo.default_branch.clone()
+        };
+        self.pending_dispatch = Some(PendingDispatch {
+            workflow: workflow_id,
+            r#ref,
+        });
+        KeyOutcome::Handled
+    }
+
+    fn confirm_dispatch(&mut self) -> KeyOutcome {
+        if self.dispatching {
+            return KeyOutcome::Handled;
+        }
+        let Some(pending) = self.pending_dispatch.take() else {
+            return KeyOutcome::Handled;
+        };
+        let Some(repo) = self.repo.clone() else {
+            return KeyOutcome::Handled;
+        };
+        self.dispatching = true;
+        self.set_progress(format!(
+            "dispatching {} @ {}…",
+            pending.workflow, pending.r#ref
+        ));
+        let generation = self.generation;
+        let adapter = Arc::clone(&self.adapter);
+        let sender = self.sender.clone();
+        std::thread::spawn(move || {
+            let result = adapter
+                .dispatch_workflow(&repo, &pending.workflow, &pending.r#ref)
+                .map(Payload::Dispatch);
+            let _ = sender.send(Completion {
+                generation,
+                target: LoadTarget::Dispatch,
+                result,
+            });
+        });
+        KeyOutcome::Handled
+    }
+
+    fn cancel_pending(&mut self) -> KeyOutcome {
+        self.pending_dispatch = None;
+        KeyOutcome::Handled
+    }
+
+    fn set_progress(&mut self, message: impl Into<String>) {
+        // Progress notices do not auto-expire; success/error notices still do.
+        self.notice = Some((message.into(), false));
+        self.notice_at = None;
     }
 
     fn start_filter(&mut self) {
@@ -761,6 +976,16 @@ impl GitHubView {
     }
 
     fn dispatch_action(&mut self, action: &str) -> KeyOutcome {
+        if self.pending_dispatch.is_some() {
+            return match action {
+                config::internal::GITHUB_CONFIRM
+                | config::internal::TOGGLE
+                | config::internal::OPEN
+                | config::internal::GITHUB_VIEW => self.confirm_dispatch(),
+                config::internal::GITHUB_FILTER_CANCEL => self.cancel_pending(),
+                _ => KeyOutcome::Handled,
+            };
+        }
         match action {
             config::internal::UP => {
                 self.move_selection(-1);
@@ -854,6 +1079,12 @@ impl GitHubView {
                 self.cycle_state();
                 KeyOutcome::Handled
             }
+            config::internal::GITHUB_WORKFLOW_DISPATCH => self.request_dispatch(),
+            config::internal::GITHUB_CONFIRM => KeyOutcome::Handled,
+            config::internal::GITHUB_FILTER_CANCEL => {
+                self.cancel_pending();
+                KeyOutcome::Handled
+            }
             other if Config::is_internal(other) => KeyOutcome::Handled,
             other => {
                 let env = self.repo.as_ref().map_or_else(Vec::new, |repo| {
@@ -869,7 +1100,24 @@ impl GitHubView {
     }
 
     fn set_notice(&mut self, message: impl Into<String>, error: bool) {
-        self.notice = Some((message.into(), error, Instant::now()));
+        self.notice = Some((message.into(), error));
+        self.notice_at = Some(Instant::now());
+    }
+
+    fn expire_notice(&mut self) {
+        let Some((_, error)) = self.notice.as_ref() else {
+            self.notice_at = None;
+            return;
+        };
+        let ttl = if *error {
+            NOTICE_ERROR_TTL
+        } else {
+            NOTICE_SUCCESS_TTL
+        };
+        if self.notice_at.is_some_and(|shown| shown.elapsed() >= ttl) {
+            self.notice = None;
+            self.notice_at = None;
+        }
     }
 
     fn row_at_mouse(&self, row: u16) -> Option<usize> {
@@ -991,6 +1239,15 @@ impl FeatureView for GitHubView {
                             );
                         }
                     }
+                    Row::Workflow(index) => {
+                        if let Some(workflow) = self.workflows.items.get(*index) {
+                            frame.render_widget(
+                                Paragraph::new(workflow_line(workflow, palette))
+                                    .style(Style::default().bg(background)),
+                                rect,
+                            );
+                        }
+                    }
                     Row::Status { message, error, .. } => {
                         frame.render_widget(
                             Paragraph::new(format!("   {message}")).style(Style::default().fg(
@@ -1023,7 +1280,14 @@ impl FeatureView for GitHubView {
                     ),
                     Style::default().fg(palette.text).bg(palette.surface0),
                 )
-            } else if let Some((message, error, _)) = &self.notice {
+            } else if let Some(pending) = &self.pending_dispatch {
+                (
+                    format!(" dispatch {} @ {}? y/N", pending.workflow, pending.r#ref),
+                    Style::default().fg(palette.yellow).bg(palette.surface0),
+                )
+            } else if self.dispatching {
+                (" dispatching…".into(), Style::default().fg(palette.accent))
+            } else if let Some((message, error)) = &self.notice {
                 (
                     format!(" {message}"),
                     Style::default().fg(if *error { palette.red } else { palette.green }),
@@ -1095,7 +1359,10 @@ impl FeatureView for GitHubView {
                 let already_selected = self.selected == selected;
                 self.selected = selected;
                 self.ensure_visible();
-                if matches!(self.selected_row(), Some(Row::Header { .. })) {
+                if matches!(
+                    self.selected_row(),
+                    Some(Row::Header { .. } | Row::Workflow(_))
+                ) {
                     self.toggle_selected()
                 } else if already_selected {
                     self.view_selected()
@@ -1140,16 +1407,7 @@ impl FeatureView for GitHubView {
         {
             self.start_load(Section::Actions);
         }
-        if self.notice.as_ref().is_some_and(|(_, error, shown)| {
-            shown.elapsed()
-                >= if *error {
-                    NOTICE_ERROR_TTL
-                } else {
-                    NOTICE_SUCCESS_TTL
-                }
-        }) {
-            self.notice = None;
-        }
+        self.expire_notice();
         self.ensure_visible();
     }
 }
@@ -1288,6 +1546,26 @@ fn pull_line<'a>(pull: &'a PullRequest, palette: &Palette) -> Line<'a> {
     ])
 }
 
+fn workflow_line<'a>(workflow: &'a Workflow, palette: &Palette) -> Line<'a> {
+    let path = PathBuf::from(&workflow.path);
+    let file = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(workflow.path.as_str());
+    Line::from(vec![
+        Span::raw("   "),
+        Span::styled("▶ ", Style::default().fg(palette.accent)),
+        Span::styled(
+            workflow.name.as_str(),
+            Style::default()
+                .fg(palette.text)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" · ", Style::default().fg(palette.overlay1)),
+        Span::styled(file.to_string(), Style::default().fg(palette.subtext0)),
+    ])
+}
+
 fn run_line<'a>(run: &'a WorkflowRun, palette: &Palette) -> Line<'a> {
     let (glyph, color) = match (run.status.as_str(), run.conclusion.as_str()) {
         ("completed", "success") => ("✓", palette.green),
@@ -1352,6 +1630,19 @@ mod tests {
         fn runs(&self, _repo: &Repository, _limit: usize) -> Result<Vec<WorkflowRun>, String> {
             Err("unused".into())
         }
+
+        fn workflows(&self, _repo: &Repository) -> Result<Vec<Workflow>, String> {
+            Err("unused".into())
+        }
+
+        fn dispatch_workflow(
+            &self,
+            _repo: &Repository,
+            _workflow: &str,
+            _ref: &str,
+        ) -> Result<String, String> {
+            Err("unused".into())
+        }
     }
 
     fn view() -> GitHubView {
@@ -1368,6 +1659,7 @@ mod tests {
             name_with_owner: "owner/repo".into(),
             host: "github.com".into(),
             url: "https://github.com/owner/repo".into(),
+            default_branch: "main".into(),
         }
     }
 
@@ -1381,6 +1673,35 @@ mod tests {
             updated_at: String::new(),
             url: String::new(),
         }
+    }
+
+    #[test]
+    fn workflow_dispatch_requires_confirmation() {
+        let mut view = view();
+        view.repo = Some(repo());
+        view.workflows.items = vec![Workflow {
+            id: 9,
+            name: "CI".into(),
+            path: ".github/workflows/ci.yml".into(),
+            state: "active".into(),
+        }];
+        view.rebuild_rows(Some(RowKey::Workflow(9)));
+        assert!(matches!(view.selected_row(), Some(Row::Workflow(_))));
+        view.request_dispatch();
+        assert_eq!(
+            view.pending_dispatch
+                .as_ref()
+                .map(|pending| pending.workflow.as_str()),
+            Some(".github/workflows/ci.yml")
+        );
+        assert_eq!(
+            view.pending_dispatch
+                .as_ref()
+                .map(|pending| pending.r#ref.as_str()),
+            Some("main")
+        );
+        view.cancel_pending();
+        assert!(view.pending_dispatch.is_none());
     }
 
     #[test]

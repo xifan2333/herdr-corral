@@ -69,8 +69,9 @@ GitHub：依赖已登录的 [GitHub CLI](https://cli.github.com/) `gh`，不在 
 `Enter` 在共享 nvim pane 启动独立的 `corral-github`：Issue 提供正文、comments、
 回复和 Close/Reopen；PR 提供 Conversation、Files、Diff、Checks、回复、Approve、
 Request Changes、merge method picker（merge/squash/rebase + head SHA 确认）和 Close/Reopen；Actions 提供 Summary、Jobs、
-logs、Cancel、Rerun Failed/All。所有网络和 mutation 均在后台运行，正文通过 stdin
-传给 `gh`，破坏性操作必须确认。GitHub Enterprise 使用
+logs、Cancel、Rerun Failed/All，以及 active workflow 列表上的 Workflow Dispatch
+（`t` 或 `Enter`，确认后触发到默认分支）。所有网络和 mutation 均在后台运行，正文
+通过 stdin 传给 `gh`，破坏性操作必须确认。GitHub Enterprise 使用
 `[HOST/]OWNER/REPO` selector。`corral-github` 也可独立运行：
 
 ```bash
@@ -96,7 +97,7 @@ corral-github run --repo owner/repo 789 --view jobs
 
 ## 下一步
 
-1. GitHub review-thread 回复和 Workflow Dispatch
+1. GitHub review-thread 回复和 Workflow Dispatch 输入参数
 2. GitHub Actions artifacts 下载
 3. editor pane/socket orphan 回收
 4. Explorer Change Folder

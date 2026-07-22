@@ -8,6 +8,18 @@ pub struct Repository {
     pub name_with_owner: String,
     pub host: String,
     pub url: String,
+    pub default_branch: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct Workflow {
+    pub id: u64,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub state: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]

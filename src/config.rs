@@ -65,6 +65,7 @@ pub mod internal {
     pub const GITHUB_MERGE: &str = "github-merge";
     pub const GITHUB_RERUN_FAILED: &str = "github-rerun-failed";
     pub const GITHUB_RERUN_ALL: &str = "github-rerun-all";
+    pub const GITHUB_WORKFLOW_DISPATCH: &str = "github-workflow-dispatch";
     pub const GITHUB_SUBMIT: &str = "github-submit";
     pub const GITHUB_CONFIRM: &str = "github-confirm";
     pub const GITHUB_CANCEL: &str = "github-cancel";
@@ -219,6 +220,7 @@ impl Config {
                 | internal::GITHUB_MERGE
                 | internal::GITHUB_RERUN_FAILED
                 | internal::GITHUB_RERUN_ALL
+                | internal::GITHUB_WORKFLOW_DISPATCH
                 | internal::GITHUB_SUBMIT
                 | internal::GITHUB_CONFIRM
                 | internal::GITHUB_CANCEL
@@ -445,12 +447,12 @@ fn is_safe_fn_name(name: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-const GITHUB_CONFIG_VERSION: u32 = 9;
+const GITHUB_CONFIG_VERSION: u32 = 11;
 const GITHUB_FUNCTION_BEGIN: &str = "# CORRAL_MIGRATION_V6_FUNCTION_BEGIN";
 const GITHUB_FUNCTION_END: &str = "# CORRAL_MIGRATION_V6_FUNCTION_END";
 const GITHUB_DETAIL_BEGIN: &str = "# CORRAL_MIGRATION_V8_FUNCTION_BEGIN";
 const GITHUB_DETAIL_END: &str = "# CORRAL_MIGRATION_V8_FUNCTION_END";
-const GITHUB_DEFAULT_BINDS: [(&str, &str); 33] = [
+const GITHUB_DEFAULT_BINDS: [(&str, &str); 36] = [
     ("github:i", internal::GITHUB_ISSUES),
     ("github:p", internal::GITHUB_PULLS),
     ("github:a", internal::GITHUB_ACTIONS),
@@ -463,8 +465,11 @@ const GITHUB_DEFAULT_BINDS: [(&str, &str); 33] = [
     ("github:f", internal::GITHUB_FILTER),
     ("github:]", internal::GITHUB_LOAD_MORE),
     ("github:s", internal::GITHUB_CYCLE_STATE),
+    ("github:t", internal::GITHUB_WORKFLOW_DISPATCH),
     ("github:tab", internal::GITHUB_NEXT_SECTION),
     ("github:backtab", internal::GITHUB_PREV_SECTION),
+    ("github:y", internal::GITHUB_CONFIRM),
+    ("github:n", internal::GITHUB_FILTER_CANCEL),
     ("github:esc", internal::GITHUB_FILTER_CANCEL),
     ("github-detail:d", internal::GITHUB_DIFF),
     ("github-detail:C", internal::GITHUB_CHECKS),
@@ -596,7 +601,7 @@ fn migrate_config(path: &Path, source: &str, default: &str) -> String {
     // context where the `corral bind` helper is temporarily unavailable.
     existing.extend(textual_binds(&source));
     let mut migrated = source.trim_end().to_string();
-    migrated.push_str("\n\n# Corral automatic migration v9: GitHub detail actions.\n");
+    migrated.push_str("\n\n# Corral automatic migration v11: GitHub workflow dispatch.\n");
     for (key, action) in GITHUB_DEFAULT_BINDS {
         if !existing.contains_key(key) {
             migrated.push_str(&format!("corral bind {key} {action}\n"));
@@ -771,8 +776,11 @@ fn fallback_binds() -> HashMap<String, String> {
         ("github:f", internal::GITHUB_FILTER),
         ("github:]", internal::GITHUB_LOAD_MORE),
         ("github:s", internal::GITHUB_CYCLE_STATE),
+        ("github:t", internal::GITHUB_WORKFLOW_DISPATCH),
         ("github:tab", internal::GITHUB_NEXT_SECTION),
         ("github:backtab", internal::GITHUB_PREV_SECTION),
+        ("github:y", internal::GITHUB_CONFIRM),
+        ("github:n", internal::GITHUB_FILTER_CANCEL),
         ("github:esc", internal::GITHUB_FILTER_CANCEL),
         ("github-detail:d", internal::GITHUB_DIFF),
         ("github-detail:C", internal::GITHUB_CHECKS),
@@ -967,11 +975,11 @@ mod tests {
     }
 
     fn migration_default() -> &'static str {
-        "CORRAL_CONFIG_VERSION=9\n# CORRAL_MIGRATION_V6_FUNCTION_BEGIN\ngithub_preview() { printf default; }\n# CORRAL_MIGRATION_V6_FUNCTION_END\n# CORRAL_MIGRATION_V8_FUNCTION_BEGIN\ngithub_detail() { printf detail; }\n# CORRAL_MIGRATION_V8_FUNCTION_END\n"
+        "CORRAL_CONFIG_VERSION=11\n# CORRAL_MIGRATION_V6_FUNCTION_BEGIN\ngithub_preview() { printf default; }\n# CORRAL_MIGRATION_V6_FUNCTION_END\n# CORRAL_MIGRATION_V8_FUNCTION_BEGIN\ngithub_detail() { printf detail; }\n# CORRAL_MIGRATION_V8_FUNCTION_END\n"
     }
 
     #[test]
-    fn v9_migration_preserves_custom_github_bind_and_function() {
+    fn v11_migration_preserves_custom_github_bind_and_function() {
         let path = tempfile_path("corral-config-migrate").unwrap();
         let source = "CORRAL_CONFIG_VERSION=5\ncorral bind github:i my-issues\ngithub_preview() { printf custom; }\n";
         std::fs::write(&path, source).unwrap();
@@ -981,13 +989,13 @@ mod tests {
         assert!(migrated.contains("github_preview() { printf custom; }"));
         assert!(!migrated.contains("github_preview() { printf default; }"));
         assert!(migrated.contains("github_detail() { printf detail; }"));
-        assert_eq!(config_version(&migrated), 9);
+        assert_eq!(config_version(&migrated), 11);
         let _ = std::fs::remove_file(path.with_extension("sh.v5.bak"));
         let _ = std::fs::remove_file(path);
     }
 
     #[test]
-    fn v9_migration_adds_missing_bindings_and_detail_function() {
+    fn v11_migration_adds_missing_bindings_and_detail_function() {
         let path = tempfile_path("corral-config-migrate").unwrap();
         let source = "CORRAL_CONFIG_VERSION=5\ncorral bind q quit\n";
         std::fs::write(&path, source).unwrap();
@@ -997,6 +1005,10 @@ mod tests {
             binds.get("github-detail:d").map(String::as_str),
             Some(internal::GITHUB_DIFF)
         );
+        assert_eq!(
+            binds.get("github:t").map(String::as_str),
+            Some(internal::GITHUB_WORKFLOW_DISPATCH)
+        );
         assert!(migrated.contains("github_preview() { printf default; }"));
         assert!(migrated.contains("github_detail() { printf detail; }"));
         assert!(path.with_extension("sh.v5.bak").is_file());
@@ -1005,7 +1017,7 @@ mod tests {
     }
 
     #[test]
-    fn v9_migration_releases_stock_l_binding_but_preserves_custom_l() {
+    fn v11_migration_releases_stock_l_binding_but_preserves_custom_l() {
         let path = tempfile_path("corral-config-migrate").unwrap();
         let stock = "CORRAL_CONFIG_VERSION=7\ncorral bind github:l github-log-failed\ngithub_preview() { :; }\n";
         std::fs::write(&path, stock).unwrap();
@@ -1030,7 +1042,7 @@ mod tests {
     }
 
     #[test]
-    fn v9_migration_moves_detail_failed_log_off_context_key() {
+    fn v11_migration_moves_detail_failed_log_off_context_key() {
         let path = tempfile_path("corral-config-migrate").unwrap();
         let source = "CORRAL_CONFIG_VERSION=8\ncorral bind github-detail:x github-log-failed\ngithub_preview() { :; }\ngithub_detail() { :; }\n";
         std::fs::write(&path, source).unwrap();

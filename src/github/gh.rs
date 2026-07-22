@@ -1,6 +1,6 @@
 use super::{
     GitHubAdapter, GitHubDetailAdapter, GitHubMutation, Issue, IssueDetail, PullRequest,
-    PullRequestDetail, Repository, WorkflowRun, WorkflowRunDetail,
+    PullRequestDetail, Repository, Workflow, WorkflowRun, WorkflowRunDetail,
 };
 use serde::Deserialize;
 use std::io::{Read, Write};
@@ -117,6 +117,13 @@ impl GhCli {
 
     fn json<T: serde::de::DeserializeOwned>(&self, args: &[String]) -> Result<T, String> {
         let bytes = self.output(args)?;
+        // Some list endpoints return an empty body for an empty result set.
+        // Treat that as `[]` so callers can deserialize Vec types cleanly.
+        let bytes = if bytes.iter().all(u8::is_ascii_whitespace) {
+            b"[]".to_vec()
+        } else {
+            bytes
+        };
         serde_json::from_slice(&bytes).map_err(|error| format!("invalid gh JSON: {error}"))
     }
 
@@ -131,6 +138,14 @@ impl GhCli {
 struct RepoJson {
     name_with_owner: String,
     url: String,
+    #[serde(default)]
+    default_branch_ref: Option<BranchRefJson>,
+}
+
+#[derive(Deserialize)]
+struct BranchRefJson {
+    #[serde(default)]
+    name: String,
 }
 
 fn repository_from(raw: RepoJson) -> Result<Repository, String> {
@@ -155,6 +170,11 @@ fn repository_from(raw: RepoJson) -> Result<Repository, String> {
         name_with_owner: raw.name_with_owner,
         host,
         url: raw.url,
+        default_branch: raw
+            .default_branch_ref
+            .map(|branch| branch.name)
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "main".into()),
     })
 }
 
@@ -330,6 +350,18 @@ impl GitHubDetailAdapter for GhCli {
                 }
                 (args, None)
             }
+            GitHubMutation::WorkflowDispatch { workflow, r#ref } => (
+                vec![
+                    "workflow".into(),
+                    "run".into(),
+                    workflow.clone(),
+                    "--repo".into(),
+                    repo.into(),
+                    "--ref".into(),
+                    r#ref.clone(),
+                ],
+                None,
+            ),
         };
         let output = self.output_with_input(&args, input)?;
         Ok(String::from_utf8_lossy(&output).trim().to_string())
@@ -342,7 +374,7 @@ impl GitHubAdapter for GhCli {
             "repo".into(),
             "view".into(),
             "--json".into(),
-            "nameWithOwner,url".into(),
+            "nameWithOwner,url,defaultBranchRef".into(),
         ];
         repository_from(self.json(&args)?)
     }
@@ -394,6 +426,35 @@ impl GitHubAdapter for GhCli {
             RUN_FIELDS.into(),
         ])
     }
+
+    fn workflows(&self, repo: &Repository) -> Result<Vec<Workflow>, String> {
+        self.json(&[
+            "workflow".into(),
+            "list".into(),
+            "--repo".into(),
+            repo.selector.clone(),
+            "--json".into(),
+            "id,name,path,state".into(),
+        ])
+    }
+
+    fn dispatch_workflow(
+        &self,
+        repo: &Repository,
+        workflow: &str,
+        r#ref: &str,
+    ) -> Result<String, String> {
+        let output = self.output(&[
+            "workflow".into(),
+            "run".into(),
+            workflow.into(),
+            "--repo".into(),
+            repo.selector.clone(),
+            "--ref".into(),
+            r#ref.into(),
+        ])?;
+        Ok(String::from_utf8_lossy(&output).trim().to_string())
+    }
 }
 
 #[cfg(test)]
@@ -405,16 +466,22 @@ mod tests {
         let github = repository_from(RepoJson {
             name_with_owner: "owner/repo".into(),
             url: "https://github.com/owner/repo".into(),
+            default_branch_ref: Some(BranchRefJson {
+                name: "main".into(),
+            }),
         })
         .unwrap();
         assert_eq!(github.selector, "owner/repo");
         assert_eq!(github.host, "github.com");
+        assert_eq!(github.default_branch, "main");
 
         let enterprise = repository_from(RepoJson {
             name_with_owner: "team/repo".into(),
             url: "https://github.example.test/team/repo".into(),
+            default_branch_ref: None,
         })
         .unwrap();
         assert_eq!(enterprise.selector, "github.example.test/team/repo");
+        assert_eq!(enterprise.default_branch, "main");
     }
 }

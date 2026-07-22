@@ -5,7 +5,7 @@
 #   standalone: ${XDG_CONFIG_HOME:-~/.config}/corral/config.sh
 # Edit THAT file — no recompile needed. Future migrations use this in-place
 # version and preserve customized bindings/functions.
-CORRAL_CONFIG_VERSION=9
+CORRAL_CONFIG_VERSION=11
 #
 # River-style: call `corral bind <key> <action>` (like `riverctl map …`).
 #   global actions: quit feature-explorer feature-scm feature-github
@@ -20,7 +20,8 @@ CORRAL_CONFIG_VERSION=9
 #                   github-filter github-load-more github-cycle-state
 #   GitHub detail:  github-comment github-approve github-context-action
 #                   github-close-reopen github-merge github-rerun-failed
-#                   github-rerun-all github-submit github-confirm github-cancel
+#                   github-rerun-all github-workflow-dispatch github-submit
+#                   github-confirm github-cancel
 #   text editing:   edit-backspace edit-delete edit-home edit-end
 #   any other action = a shell function of that name (defined below)
 #
@@ -80,8 +81,11 @@ corral bind github:L github-log
 corral bind github:f github-filter
 corral bind github:] github-load-more
 corral bind github:s github-cycle-state
+corral bind github:t github-workflow-dispatch
 corral bind github:tab github-next-section
 corral bind github:backtab github-prev-section
+corral bind github:y github-confirm
+corral bind github:n github-filter-cancel
 corral bind github:esc github-filter-cancel
 
 corral bind github-detail:d github-diff
