@@ -60,7 +60,9 @@ while true; do
     "FOCUS "*)
       pid="${decision#FOCUS }"
       # Toggle: if already focused → close. Otherwise → focus.
-      if [[ "$fid" == "$pid" ]]; then
+      cfid="$(printf '%s' "$panes" | "$bin" --focused-pane 2>/dev/null || true)"
+      cfid="${cfid%%	*}"
+      if [[ "$cfid" == "$pid" ]]; then
         "$herdr_bin" pane close "$pid" >/dev/null 2>&1 || exit 1
         exit 0
       fi
