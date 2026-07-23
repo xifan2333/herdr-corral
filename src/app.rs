@@ -167,11 +167,10 @@ fn run_shell_action(
     file: Option<&std::path::Path>,
     env: &[(String, String)],
 ) -> io::Result<bool> {
-    // Hosted Herdr actions (split/send-text) must NOT leave the alt-screen — that
-    // flash is what users see when open fails or only needs the herdr CLI.
-    // Standalone $EDITOR still needs a real TTY: probe first with a dry convention
-    // by checking HERDR_ENV, or let the action request suspend via stdout.
-    let hosted = std::env::var_os("HERDR_ENV").is_some();
+    // Hosted (Herdr / WezTerm) actions use side-pane reuse — never leave the
+    // alt-screen. Standalone $EDITOR still gets a real TTY after probing.
+    let hosted = std::env::var_os("HERDR_ENV").is_some()
+        || std::env::var_os("WEZTERM_PANE").is_some();
 
     if hosted {
         // Keep TUI up; capture action stdout/stderr.
