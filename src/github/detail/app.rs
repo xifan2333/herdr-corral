@@ -20,7 +20,7 @@ use crossterm::terminal::{
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::{Frame, Terminal};
@@ -988,6 +988,15 @@ impl DetailApp {
         if area.height == 0 {
             return 0;
         }
+        // Reset the whole area's background every frame. Without this, inline
+        // code / code-block cells (bg = surface0) leak their background into
+        // later frames: blank lines and short rows never overwrite those cells,
+        // so scrolling smears stray gray blocks across the page. Reset (not a
+        // themed fill) keeps the body visually transparent as before.
+        frame.render_widget(
+            Block::default().style(Style::default().bg(Color::Reset)),
+            area,
+        );
         // Badge-style header: number pill + title, state pill on the right.
         let (number, title) = self.title_parts();
         let number_badge = format!(" {number} ");
