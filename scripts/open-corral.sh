@@ -59,6 +59,11 @@ while true; do
   case "$decision" in
     "FOCUS "*)
       pid="${decision#FOCUS }"
+      # Toggle: if already focused → close. Otherwise → focus.
+      if [[ "$fid" == "$pid" ]]; then
+        "$herdr_bin" pane close "$pid" >/dev/null 2>&1 || exit 1
+        exit 0
+      fi
       resize_sidebar "$pid" || exit 1
       focus_pane "$pid" || exit 1
       exit 0
