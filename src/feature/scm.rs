@@ -680,11 +680,13 @@ impl ScmView {
         let result = match drawer {
             Drawer::Graph => git.graph(20),
             Drawer::Commits => git.commits(20),
-            Drawer::FileHistory => self
-                .last_file_path
-                .as_deref()
-                .ok_or_else(|| "select a file for history".to_string())
-                .and_then(|path| git.file_history(path, 20)),
+            // No selected file: empty drawer. Hint is a one-shot footer flash
+            // from set_drawer_expanded only — never from load_drawer, because
+            // auto-refresh reloads expanded drawers every 1.5s.
+            Drawer::FileHistory => match self.last_file_path.as_deref() {
+                Some(path) => git.file_history(path, 20),
+                None => Ok(Vec::new()),
+            },
             Drawer::Branches => git.branches(),
             Drawer::Worktrees => git.worktrees(),
             Drawer::Remotes => git.remotes(),
@@ -707,13 +709,19 @@ impl ScmView {
             }
             Err(error) => {
                 self.drawer_lines[drawer.index()].clear();
-                self.set_flash(error, true);
+                // Hard failures only; do not re-arm the same flash on refresh.
+                if self.flash.as_ref().is_none_or(|(msg, _)| msg != &error) {
+                    self.set_flash(error, true);
+                }
             }
         }
     }
 
     fn set_drawer_expanded(&mut self, drawer: Drawer, expanded: bool) {
         if expanded {
+            if matches!(drawer, Drawer::FileHistory) && self.last_file_path.is_none() {
+                self.set_flash("select a file for history", true);
+            }
             self.load_drawer(drawer);
         }
         self.drawer_expanded[drawer.index()] = expanded;
@@ -992,8 +1000,11 @@ impl ScmView {
 
     fn dispatch_action(&mut self, action: &str) -> KeyOutcome {
         if self.pending_discard.is_some() {
+            // Enter (toggle/open) confirms; Esc (scm-cancel) aborts. No y/n.
             return match action {
-                config::internal::SCM_CONFIRM => self.confirm_discard(),
+                config::internal::TOGGLE
+                | config::internal::OPEN
+                | config::internal::SCM_OPEN_DIFF => self.confirm_discard(),
                 config::internal::SCM_CANCEL => self.cancel_transient(),
                 _ => KeyOutcome::Handled,
             };
@@ -1421,7 +1432,7 @@ impl FeatureView for ScmView {
         );
         if let Some(entry) = &self.pending_discard {
             frame.render_widget(
-                Paragraph::new(format!(" Discard {}? y/N", entry.path))
+                Paragraph::new(format!(" Discard {}?", entry.path))
                     .style(Style::default().fg(palette.red).bg(palette.surface0)),
                 notice_rect,
             );

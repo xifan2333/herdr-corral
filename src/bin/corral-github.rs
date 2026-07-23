@@ -1,4 +1,4 @@
-use corral::github_detail::{self, DetailResource, InitialView};
+use corral::github::detail::{self, DetailResource, InitialView};
 
 fn usage() -> ! {
     eprintln!("usage: corral-github <issue|pr|run> --repo [HOST/]OWNER/REPO <id> [--view VIEW]");
@@ -49,7 +49,7 @@ fn main() {
         "run" | "action" => DetailResource::Run(id),
         _ => usage(),
     };
-    if let Err(error) = github_detail::run(repo, resource, view) {
+    if let Err(error) = detail::run(repo, resource, view) {
         eprintln!("corral-github: {error}");
         std::process::exit(1);
     }

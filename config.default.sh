@@ -1,11 +1,12 @@
 # Corral default config (shell). Shipped with the plugin as config.default.sh.
 #
-# On first run Corral copies this to your editable config:
-#   plugin:     $(herdr plugin config-dir corral)/config.sh
-#   standalone: ${XDG_CONFIG_HOME:-~/.config}/corral/config.sh
-# Edit THAT file — no recompile needed. Future migrations use this in-place
-# version and preserve customized bindings/functions.
-CORRAL_CONFIG_VERSION=13
+# On first run Corral copies this to the single editable config:
+#   ${XDG_CONFIG_HOME:-~/.config}/corral/config.sh
+# Edit THAT file — one path for Herdr plugin and standalone. Host differences
+# are detected in shell via $HERDR_ENV / $HERDR_BIN_PATH (see open(), github_detail).
+# Future migrations use this in-place version and preserve customized
+# bindings/functions.
+CORRAL_CONFIG_VERSION=14
 #
 # River-style: call `corral bind <key> <action>` (like `riverctl map …`).
 #   global actions: quit feature-explorer feature-scm feature-github
@@ -14,7 +15,7 @@ CORRAL_CONFIG_VERSION=13
 #   Explorer:       explorer-create explorer-delete explorer-rename
 #   SCM actions:    scm-toggle-stage scm-stage-all scm-unstage-all scm-open-diff
 #                   scm-focus-message scm-suggest-message scm-discard
-#                   scm-confirm scm-cancel scm-sync
+#                   scm-cancel scm-sync
 #   GitHub:         github-issues github-pulls github-actions github-view
 #                   github-diff github-checks github-log github-log-failed
 #                   github-filter github-load-more github-cycle-state
@@ -63,8 +64,6 @@ corral bind u scm-unstage-all
 corral bind o scm-open-diff
 corral bind c scm-focus-message
 corral bind D scm-discard
-corral bind y scm-confirm
-corral bind n scm-cancel
 corral bind esc scm-cancel
 corral bind S scm-sync
 corral bind A scm-suggest-message
@@ -96,6 +95,7 @@ corral bind github-detail:L github-log
 corral bind github-detail:tab github-next-section
 corral bind github-detail:backtab github-prev-section
 corral bind github-detail:c github-comment
+corral bind github-detail:o open
 corral bind github-detail:a github-approve
 corral bind github-detail:x github-context-action
 corral bind github-detail:D github-close-reopen
@@ -532,18 +532,25 @@ github_preview() {
 # CORRAL_MIGRATION_V8_FUNCTION_BEGIN
 # Open the independent full-width GitHub client in the same owner-scoped nvim
 # terminal used by Explorer and SCM previews.
-# Inline image rendering in the GitHub client uses the kitty graphics protocol
-# and only works on a kitty-capable terminal (with passthrough when hosted in
-# nvim). Off by default; set to 1 to enable. CORRAL_GITHUB_IMAGE_ROWS sets the
-# reserved height per image (default 12).
-CORRAL_GITHUB_IMAGES="${CORRAL_GITHUB_IMAGES:-0}"
-CORRAL_GITHUB_IMAGE_ROWS="${CORRAL_GITHUB_IMAGE_ROWS:-12}"
+# Images are rendered as text links; click (or press o) downloads the file and
+# opens it with CORRAL_GITHUB_IMAGE_VIEWER (default: imv).
+CORRAL_GITHUB_IMAGE_VIEWER="${CORRAL_GITHUB_IMAGE_VIEWER:-imv}"
 github_detail() {
   local kind="${CORRAL_GITHUB_KIND:-}" repo="${CORRAL_GITHUB_REPO:-}"
   local number="${CORRAL_GITHUB_NUMBER:-}" run_id="${CORRAL_GITHUB_RUN_ID:-}"
-  local bin qbin qrepo qimg qrows resource id view cmd
+  local bin qbin qrepo qviewer resource id view cmd
   [[ -n "$repo" ]] || return 1
   bin=$(command -v corral-github 2>/dev/null || true)
+  if [[ -z "$bin" && -n "${HERDR_PLUGIN_ROOT:-}" ]]; then
+    for candidate in \
+      "$HERDR_PLUGIN_ROOT/target/release/corral-github" \
+      "$HERDR_PLUGIN_ROOT/target/debug/corral-github"; do
+      if [[ -x "$candidate" ]]; then
+        bin=$candidate
+        break
+      fi
+    done
+  fi
   [[ -n "$bin" ]] || { github_preview; return $?; }
   case "$kind" in
     issue) resource=issue; id=$number; view=overview ;;
@@ -557,10 +564,9 @@ github_detail() {
   esac
   [[ "$id" =~ ^[0-9]+$ ]] || return 1
   qbin=$(printf '%q' "$bin"); qrepo=$(printf '%q' "$repo")
-  qimg=$(printf '%q' "${CORRAL_GITHUB_IMAGES:-0}")
-  qrows=$(printf '%q' "${CORRAL_GITHUB_IMAGE_ROWS:-12}")
-  printf -v cmd 'exec env CORRAL_GITHUB_IMAGES=%s CORRAL_GITHUB_IMAGE_ROWS=%s %s %s --repo %s %s --view %s' \
-    "$qimg" "$qrows" "$qbin" "$resource" "$qrepo" "$id" "$view"
+  qviewer=$(printf '%q' "${CORRAL_GITHUB_IMAGE_VIEWER:-imv}")
+  printf -v cmd 'exec env CORRAL_GITHUB_IMAGE_VIEWER=%s %s %s --repo %s %s --view %s' \
+    "$qviewer" "$qbin" "$resource" "$qrepo" "$id" "$view"
   if [[ -n "${HERDR_BIN_PATH:-}" && -n "${HERDR_ENV:-}" ]]; then
     echo CORRAL_SUSPEND=0
     _corral_run "$cmd"

@@ -17,6 +17,7 @@ use std::cell::Cell;
 use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::path::{Component, Path, PathBuf};
+use std::process::Command;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -43,6 +44,28 @@ enum PendingEdit {
 
 fn visible_name(name: &str, show_hidden: bool) -> bool {
     name != ".git" && (show_hidden || !name.starts_with('.'))
+}
+
+/// Move a path to the desktop trash via FreeDesktop `gio trash`.
+/// Never permanently unlink from Explorer.
+fn trash_path(path: &Path) -> Result<(), String> {
+    if !path.exists() {
+        return Err("path does not exist".into());
+    }
+    let output = Command::new("gio")
+        .args(["trash", "--"])
+        .arg(path)
+        .output()
+        .map_err(|error| format!("gio trash: {error}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if stderr.is_empty() {
+        Err(format!("gio trash failed ({})", output.status))
+    } else {
+        Err(stderr)
+    }
 }
 
 fn watch_event_affects_tree(root: &Path, event: &notify::Event) -> bool {
@@ -441,20 +464,15 @@ impl ExplorerView {
         let Some(PendingEdit::Delete { path }) = self.pending.clone() else {
             return KeyOutcome::Handled;
         };
-        let result = if path.is_dir() {
-            fs::remove_dir_all(&path)
-        } else {
-            fs::remove_file(&path)
-        };
-        match result {
+        match trash_path(&path) {
             Ok(()) => {
                 self.expanded
                     .retain(|expanded| !expanded.starts_with(&path));
                 self.pending = None;
-                self.set_notice(format!("deleted {}", path.display()), false);
+                self.set_notice(format!("trashed {}", path.display()), false);
                 self.rebuild();
             }
-            Err(error) => self.set_notice(format!("delete {}: {error}", path.display()), true),
+            Err(error) => self.set_notice(format!("trash {}: {error}", path.display()), true),
         }
         KeyOutcome::Handled
     }
@@ -464,8 +482,13 @@ impl ExplorerView {
             .and_then(|token| self.config.action_for_feature_key("explorer", &token))
             .map(str::to_string);
         if matches!(self.pending, Some(PendingEdit::Delete { .. })) {
+            // Enter (toggle/open) confirms; Esc (scm-cancel) aborts. No y/n.
             return match action.as_deref() {
-                Some(config::internal::SCM_CONFIRM) => self.confirm_delete(),
+                Some(
+                    config::internal::TOGGLE
+                    | config::internal::OPEN
+                    | config::internal::SCM_OPEN_DIFF,
+                ) => self.confirm_delete(),
                 Some(config::internal::SCM_CANCEL) => self.cancel_pending(),
                 _ => KeyOutcome::Handled,
             };
@@ -802,7 +825,7 @@ impl FeatureView for ExplorerView {
                 }
                 Some(PendingEdit::Delete { path }) => (
                     format!(
-                        " Delete {}? y/N",
+                        " Delete {}?",
                         path.file_name()
                             .map(|name| name.to_string_lossy())
                             .unwrap_or_else(|| path.display().to_string().into())
@@ -992,7 +1015,19 @@ mod tests {
         view.select_path(&renamed);
         view.start_delete();
         view.confirm_delete();
-        assert!(!renamed.exists());
+        // Prefer trash (gio); if the host has no trash backend in CI, the
+        // path may still exist and the notice carries the error — either way
+        // Explorer must not hard-rm.
+        if renamed.exists() {
+            assert!(
+                view.notice
+                    .as_ref()
+                    .is_some_and(|(msg, error)| *error && msg.contains("trash")),
+                "expected trash notice when path remains, got {:?}",
+                view.notice
+            );
+            fs::remove_file(&renamed).unwrap();
+        }
 
         let external = root.join("external.txt");
         fs::write(&external, "outside\n").unwrap();

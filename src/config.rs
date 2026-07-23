@@ -1,7 +1,8 @@
 //! User config: one shell file (`config.sh`), River-style.
 //!
 //! ```sh
-//! # ~/.config/corral/config.sh  — or $HERDR_PLUGIN_CONFIG_DIR/config.sh
+//! # always: ${XDG_CONFIG_HOME:-~/.config}/corral/config.sh
+//! # Herdr vs standalone is detected inside the shell via $HERDR_ENV / $HERDR_BIN_PATH
 //! corral bind enter open
 //! corral bind j down
 //!
@@ -423,12 +424,11 @@ pub struct ShellResult {
     pub suspend: bool,
 }
 
+/// Single user config directory for both Herdr-plugin and standalone launches.
+///
+/// Host differences (Herdr pane RPC vs WezTerm/standalone editor) are not
+/// separate config files — `config.sh` branches on `$HERDR_ENV` / `$HERDR_BIN_PATH`.
 fn config_dir() -> PathBuf {
-    if let Ok(p) = std::env::var("HERDR_PLUGIN_CONFIG_DIR") {
-        if !p.is_empty() {
-            return PathBuf::from(p);
-        }
-    }
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
         if !xdg.is_empty() {
             return PathBuf::from(xdg).join("corral");
@@ -449,12 +449,12 @@ fn is_safe_fn_name(name: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-const GITHUB_CONFIG_VERSION: u32 = 13;
+const GITHUB_CONFIG_VERSION: u32 = 14;
 const GITHUB_FUNCTION_BEGIN: &str = "# CORRAL_MIGRATION_V6_FUNCTION_BEGIN";
 const GITHUB_FUNCTION_END: &str = "# CORRAL_MIGRATION_V6_FUNCTION_END";
 const GITHUB_DETAIL_BEGIN: &str = "# CORRAL_MIGRATION_V8_FUNCTION_BEGIN";
 const GITHUB_DETAIL_END: &str = "# CORRAL_MIGRATION_V8_FUNCTION_END";
-const GITHUB_DEFAULT_BINDS: [(&str, &str); 37] = [
+const GITHUB_DEFAULT_BINDS: [(&str, &str); 38] = [
     ("github:i", internal::GITHUB_ISSUES),
     ("github:p", internal::GITHUB_PULLS),
     ("github:a", internal::GITHUB_ACTIONS),
@@ -481,6 +481,7 @@ const GITHUB_DEFAULT_BINDS: [(&str, &str); 37] = [
     ("github-detail:tab", internal::GITHUB_NEXT_SECTION),
     ("github-detail:backtab", internal::GITHUB_PREV_SECTION),
     ("github-detail:c", internal::GITHUB_COMMENT),
+    ("github-detail:o", internal::OPEN),
     ("github-detail:a", internal::GITHUB_APPROVE),
     ("github-detail:x", internal::GITHUB_CONTEXT_ACTION),
     ("github-detail:D", internal::GITHUB_CLOSE_REOPEN),
@@ -604,7 +605,7 @@ fn migrate_config(path: &Path, source: &str, default: &str) -> String {
     // context where the `corral bind` helper is temporarily unavailable.
     existing.extend(textual_binds(&source));
     let mut migrated = source.trim_end().to_string();
-    migrated.push_str("\n\n# Corral automatic migration v13: GitHub detail images + markdown.\n");
+    migrated.push_str("\n\n# Corral automatic migration v14: GitHub image text links + imv.\n");
     for (key, action) in GITHUB_DEFAULT_BINDS {
         if !existing.contains_key(key) {
             migrated.push_str(&format!("corral bind {key} {action}\n"));
@@ -617,8 +618,8 @@ fn migrate_config(path: &Path, source: &str, default: &str) -> String {
             migrated.push('\n');
         }
     }
-    // Always refresh the marked github_detail block so image env injection and
-    // CORRAL_GITHUB_IMAGES defaults land without clobbering user binds.
+    // Always refresh the marked github_detail block so image viewer env
+    // injection (CORRAL_GITHUB_IMAGE_VIEWER) lands without clobbering user binds.
     if let Some(block) = marked_block(default, GITHUB_DETAIL_BEGIN, GITHUB_DETAIL_END) {
         if let (Some(start), Some(end)) = (
             migrated.find(GITHUB_DETAIL_BEGIN),
@@ -803,6 +804,7 @@ fn fallback_binds() -> HashMap<String, String> {
         ("github-detail:tab", internal::GITHUB_NEXT_SECTION),
         ("github-detail:backtab", internal::GITHUB_PREV_SECTION),
         ("github-detail:c", internal::GITHUB_COMMENT),
+        ("github-detail:o", internal::OPEN),
         ("github-detail:a", internal::GITHUB_APPROVE),
         ("github-detail:x", internal::GITHUB_CONTEXT_ACTION),
         ("github-detail:D", internal::GITHUB_CLOSE_REOPEN),
@@ -819,8 +821,6 @@ fn fallback_binds() -> HashMap<String, String> {
         ("o", internal::SCM_OPEN_DIFF),
         ("c", internal::SCM_FOCUS_MESSAGE),
         ("D", internal::SCM_DISCARD),
-        ("y", internal::SCM_CONFIRM),
-        ("n", internal::SCM_CANCEL),
         ("esc", internal::SCM_CANCEL),
         ("S", internal::SCM_SYNC),
         ("backspace", internal::EDIT_BACKSPACE),
@@ -989,7 +989,7 @@ mod tests {
     }
 
     fn migration_default() -> &'static str {
-        "CORRAL_CONFIG_VERSION=13\n# CORRAL_MIGRATION_V6_FUNCTION_BEGIN\ngithub_preview() { printf default; }\n# CORRAL_MIGRATION_V6_FUNCTION_END\n# CORRAL_MIGRATION_V8_FUNCTION_BEGIN\nCORRAL_GITHUB_IMAGES=\"${CORRAL_GITHUB_IMAGES:-0}\"\ngithub_detail() { printf detail; }\n# CORRAL_MIGRATION_V8_FUNCTION_END\n"
+        "CORRAL_CONFIG_VERSION=14\n# CORRAL_MIGRATION_V6_FUNCTION_BEGIN\ngithub_preview() { printf default; }\n# CORRAL_MIGRATION_V6_FUNCTION_END\n# CORRAL_MIGRATION_V8_FUNCTION_BEGIN\nCORRAL_GITHUB_IMAGE_VIEWER=\"${CORRAL_GITHUB_IMAGE_VIEWER:-imv}\"\ngithub_detail() { printf detail; }\n# CORRAL_MIGRATION_V8_FUNCTION_END\n"
     }
 
     #[test]
@@ -1003,7 +1003,7 @@ mod tests {
         assert!(migrated.contains("github_preview() { printf custom; }"));
         assert!(!migrated.contains("github_preview() { printf default; }"));
         assert!(migrated.contains("github_detail() { printf detail; }"));
-        assert_eq!(config_version(&migrated), 13);
+        assert_eq!(config_version(&migrated), 14);
         let _ = std::fs::remove_file(path.with_extension("sh.v5.bak"));
         let _ = std::fs::remove_file(path);
     }
@@ -1062,9 +1062,9 @@ mod tests {
         std::fs::write(&path, source).unwrap();
         let migrated = migrate_config(&path, source, migration_default());
         assert!(migrated.contains("github_detail() { printf detail; }"));
-        assert!(migrated.contains("CORRAL_GITHUB_IMAGES"));
+        assert!(migrated.contains("CORRAL_GITHUB_IMAGE_VIEWER"));
         assert!(!migrated.contains("printf stale"));
-        assert_eq!(config_version(&migrated), 13);
+        assert_eq!(config_version(&migrated), 14);
         let _ = std::fs::remove_file(path.with_extension("sh.v12.bak"));
         let _ = std::fs::remove_file(path);
     }

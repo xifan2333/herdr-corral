@@ -34,9 +34,9 @@ devicons = "0.6"
 notify = "8"
 # Markdown rendering in the GitHub detail client.
 pulldown-cmark = { version = "0.13", default-features = false }
-# Inline images (kitty/sixel/iterm2) for the GitHub detail client.
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
-ratatui-image = { version = "11", default-features = false, features = ["crossterm"] }
+# Terminal display columns for CJK / emoji wrapping in the GitHub client.
+unicode-width = "0.2"
+# Download GitHub attachment images for an external viewer (imv by default).
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 
 [profile.release]

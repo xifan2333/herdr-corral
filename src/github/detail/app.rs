@@ -1,32 +1,30 @@
-//! Full-width interactive GitHub detail client used by `corral-github`.
-//!
-//! The 32-column sidebar remains a navigator. This app runs in the shared
-//! owner-scoped nvim terminal and owns resource detail presentation.
+//! Interactive state machine and terminal loop for GitHub detail.
 
+use super::images::{open_image_externally, ImagePlacement};
+use super::pages::{
+    check_lines, issue_page, log_lines, patch_lines, pull_files, pull_page, run_jobs, run_overview,
+};
+use super::util::{short_sha, state_color, styled_text};
 use crate::config::{self, Config};
 use crate::github::{
     GhCli, GitHubDetailAdapter, GitHubMutation, IssueDetail, MergeMethod, PullRequestDetail,
-    Review, WorkflowRunDetail,
+    WorkflowRunDetail,
 };
 use crate::ui::Palette;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
+use crossterm::event::{
+    self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use pulldown_cmark::{Event as MdEvent, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::{Frame, Terminal};
-use ratatui_image::picker::{Picker, ProtocolType};
-use ratatui_image::protocol::StatefulProtocol;
-use ratatui_image::{Resize, StatefulImage};
-use serde_json::Value;
-use std::collections::{HashMap, HashSet};
-use std::io::{self, Read, Stdout};
+use std::io::{self, Stdout};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
@@ -35,33 +33,6 @@ use std::time::{Duration, Instant};
 const NOTICE_SUCCESS_TTL: Duration = Duration::from_secs(2);
 const NOTICE_ERROR_TTL: Duration = Duration::from_secs(4);
 const MAX_MESSAGE_CHARS: usize = 65_536;
-const DEFAULT_IMAGE_ROWS: u16 = 12;
-const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
-
-/// One markdown image discovered while rendering, keyed by its final line index.
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ImagePlacement {
-    line: usize,
-    url: String,
-    rows: u16,
-}
-
-/// Runtime image toggle. Off unless the host opts in via config/env, because
-/// inline graphics only work on a kitty-protocol-capable terminal.
-fn images_enabled() -> bool {
-    matches!(
-        std::env::var("CORRAL_GITHUB_IMAGES").ok().as_deref(),
-        Some("1") | Some("true") | Some("yes") | Some("on")
-    )
-}
-
-fn image_rows() -> u16 {
-    std::env::var("CORRAL_GITHUB_IMAGE_ROWS")
-        .ok()
-        .and_then(|value| value.parse::<u16>().ok())
-        .filter(|rows| *rows > 0)
-        .unwrap_or(DEFAULT_IMAGE_ROWS)
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DetailResource {
@@ -84,7 +55,7 @@ pub enum InitialView {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Tab {
+pub(super) enum Tab {
     Overview,
     Conversation,
     Files,
@@ -108,34 +79,36 @@ impl Tab {
     }
 }
 
-enum Detail {
+pub(super) enum Detail {
     Issue(IssueDetail),
     Pull(PullRequestDetail),
     Run(WorkflowRunDetail),
 }
 
-enum Payload {
+pub(super) enum Payload {
     Detail(Box<Detail>),
     Patch(String),
     Log { text: String, failed_only: bool },
     Mutation(String),
+    ImageOpen(String),
 }
 
 #[derive(Clone, Copy)]
-enum Request {
+pub(super) enum Request {
     Detail,
     Patch,
     Log,
     Mutation,
+    ImageOpen,
 }
 
 #[derive(Clone, Copy)]
-enum ComposeKind {
+pub(super) enum ComposeKind {
     Comment,
     RequestChanges,
 }
 
-enum Mode {
+pub(super) enum Mode {
     Browse,
     Compose {
         kind: ComposeKind,
@@ -152,18 +125,18 @@ enum Mode {
     },
 }
 
-struct Completion {
+pub(super) struct Completion {
     generation: u64,
     request: Request,
     result: Result<Payload, String>,
 }
 
-struct DetailApp {
+pub(super) struct DetailApp {
     repo: String,
     resource: DetailResource,
     adapter: Arc<dyn GitHubDetailAdapter>,
     config: Arc<Config>,
-    detail: Option<Detail>,
+    pub(super) detail: Option<Detail>,
     patch: Option<String>,
     patch_error: Option<String>,
     log: Option<(String, bool)>,
@@ -175,17 +148,15 @@ struct DetailApp {
     loading_patch: bool,
     loading_log: bool,
     mutation_loading: bool,
-    mode: Mode,
+    pub(super) mode: Mode,
     notice: Option<(String, bool, Instant)>,
     error: Option<String>,
     content_revision: u64,
     rendered_key: Option<(Tab, u16, u64)>,
     rendered_lines: Vec<Line<'static>>,
     images: Vec<ImagePlacement>,
-    images_enabled: bool,
-    picker: Option<Picker>,
-    protocols: HashMap<String, StatefulProtocol>,
-    image_errors: HashSet<String>,
+    body_area: Rect,
+    image_loading: bool,
     generation: u64,
     sender: Sender<Completion>,
     receiver: Receiver<Completion>,
@@ -202,7 +173,7 @@ impl DetailApp {
         Self::with_adapter(repo, resource, initial, config, adapter)
     }
 
-    fn with_adapter(
+    pub(super) fn with_adapter(
         repo: String,
         resource: DetailResource,
         initial: InitialView,
@@ -234,10 +205,8 @@ impl DetailApp {
             rendered_key: None,
             rendered_lines: Vec::new(),
             images: Vec::new(),
-            images_enabled: images_enabled(),
-            picker: None,
-            protocols: HashMap::new(),
-            image_errors: HashSet::new(),
+            body_area: Rect::default(),
+            image_loading: false,
             generation: 0,
             sender,
             receiver,
@@ -421,7 +390,7 @@ impl DetailApp {
         }
     }
 
-    fn context_action(&mut self) {
+    pub(super) fn context_action(&mut self) {
         match (&self.resource, &self.detail) {
             (DetailResource::Issue(number), Some(Detail::Issue(issue))) => {
                 let open = !issue.state.eq_ignore_ascii_case("open");
@@ -492,7 +461,7 @@ impl DetailApp {
         );
     }
 
-    fn merge_pull(&mut self) {
+    pub(super) fn merge_pull(&mut self) {
         let (DetailResource::Pull(number), Some(Detail::Pull(pull))) =
             (self.resource, &self.detail)
         else {
@@ -512,7 +481,7 @@ impl DetailApp {
         };
     }
 
-    fn confirm_selected_merge(&mut self) {
+    pub(super) fn confirm_selected_merge(&mut self) {
         let Mode::MergeMethod {
             number,
             head_sha,
@@ -562,7 +531,7 @@ impl DetailApp {
         );
     }
 
-    fn submit_compose(&mut self) {
+    pub(super) fn submit_compose(&mut self) {
         let Mode::Compose { kind, text } = &self.mode else {
             return;
         };
@@ -637,8 +606,12 @@ impl DetailApp {
             Request::Patch => self.loading_patch = false,
             Request::Log => self.loading_log = false,
             Request::Mutation => self.mutation_loading = false,
+            Request::ImageOpen => self.image_loading = false,
         }
-        self.content_revision = self.content_revision.wrapping_add(1);
+        // Image open only updates the footer notice; avoid rebuilding the page.
+        if !matches!(completion.request, Request::ImageOpen) {
+            self.content_revision = self.content_revision.wrapping_add(1);
+        }
         match completion.result {
             Ok(Payload::Detail(detail)) => self.detail = Some(*detail),
             Ok(Payload::Patch(patch)) => {
@@ -665,8 +638,9 @@ impl DetailApp {
                 self.log_error = None;
                 self.start_detail();
             }
+            Ok(Payload::ImageOpen(message)) => self.set_notice(message, false),
             Err(error) => match completion.request {
-                Request::Mutation => self.set_notice(error, true),
+                Request::Mutation | Request::ImageOpen => self.set_notice(error, true),
                 Request::Patch => self.patch_error = Some(error),
                 Request::Log => self.log_error = Some(error),
                 Request::Detail => self.error = Some(error),
@@ -688,86 +662,80 @@ impl DetailApp {
         }) {
             self.notice = None;
         }
-        self.load_pending_images();
     }
 
-    fn ensure_picker(&mut self) {
-        if self.picker.is_none() {
-            let mut picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
-            // The host explicitly opted into kitty graphics.
-            picker.set_protocol_type(ProtocolType::Kitty);
-            self.picker = Some(picker);
-        }
-    }
-
-    /// Best-effort, bounded image fetch. Runs off the draw path so a slow image
-    /// never blocks rendering; at most two new images are decoded per tick.
-    fn load_pending_images(&mut self) {
-        if !self.images_enabled || self.images.is_empty() {
-            return;
-        }
-        self.ensure_picker();
-        let picker = self.picker.take();
-        if let Some(picker) = &picker {
-            let mut loaded = 0;
-            for placement in self.images.clone() {
-                if loaded >= 2 {
-                    break;
-                }
-                if self.protocols.contains_key(&placement.url)
-                    || self.image_errors.contains(&placement.url)
-                {
-                    continue;
-                }
-                match fetch_image(&placement.url) {
-                    Ok(image) => {
-                        self.protocols
-                            .insert(placement.url.clone(), picker.new_resize_protocol(image));
-                    }
-                    Err(_) => {
-                        self.image_errors.insert(placement.url.clone());
-                    }
-                }
-                loaded += 1;
+    fn open_image_at_line(&mut self, line: usize) {
+        let Some(placement) = self.images.iter().find(|image| image.line == line).cloned() else {
+            if !self.images.is_empty() {
+                self.set_notice("no image on this line — click a [image] row or press o", true);
             }
-        }
-        self.picker = picker;
+            return;
+        };
+        self.open_image(&placement.url, &placement.alt);
     }
 
-    fn render_images(&mut self, frame: &mut Frame, body: Rect) {
-        if !self.images_enabled || self.protocols.is_empty() {
-            return;
-        }
+    fn open_first_visible_image(&mut self) {
+        let height = usize::from(self.body_height.max(1));
         let scroll = self.scroll;
-        let height = usize::from(body.height);
-        // Collect visible placements first to avoid borrow conflicts.
-        let visible: Vec<(u16, u16, String)> = self
+        let Some(placement) = self
             .images
             .iter()
-            .filter_map(|placement| {
-                if placement.line < scroll || placement.line - scroll >= height {
-                    return None;
-                }
-                let offset = u16::try_from(placement.line - scroll).ok()?;
-                let avail = body.height.saturating_sub(offset);
-                let rows = placement.rows.min(avail);
-                (rows >= 2).then(|| (offset, rows, placement.url.clone()))
-            })
-            .collect();
-        for (offset, rows, url) in visible {
-            if let Some(protocol) = self.protocols.get_mut(&url) {
-                let rect = Rect {
-                    x: body.x.saturating_add(3),
-                    y: body.y.saturating_add(offset),
-                    width: body.width.saturating_sub(3),
-                    height: rows,
-                };
-                frame.render_stateful_widget(
-                    StatefulImage::<StatefulProtocol>::new().resize(Resize::Fit(None)),
-                    rect,
-                    protocol,
-                );
+            .find(|image| image.line >= scroll && image.line - scroll < height)
+            .cloned()
+        else {
+            self.set_notice("no image on this page", true);
+            return;
+        };
+        self.open_image(&placement.url, &placement.alt);
+    }
+
+    fn open_image(&mut self, url: &str, alt: &str) {
+        if self.image_loading {
+            self.set_notice("image already opening…", true);
+            return;
+        }
+        self.image_loading = true;
+        self.set_notice("downloading image…", false);
+        let generation = self.generation;
+        let url = url.to_string();
+        let alt = alt.to_string();
+        let sender = self.sender.clone();
+        std::thread::spawn(move || {
+            let result = open_image_externally(&url, &alt).map(Payload::ImageOpen);
+            let _ = sender.send(Completion {
+                generation,
+                request: Request::ImageOpen,
+                result,
+            });
+        });
+    }
+
+    fn handle_mouse(&mut self, mouse: MouseEvent) {
+        match mouse.kind {
+            MouseEventKind::ScrollDown => {
+                let count = self.rendered_lines.len();
+                self.scroll_by(3, count);
             }
+            MouseEventKind::ScrollUp => {
+                let count = self.rendered_lines.len();
+                self.scroll_by(-3, count);
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                if !matches!(self.mode, Mode::Browse) {
+                    return;
+                }
+                let body = self.body_area;
+                if mouse.column < body.x
+                    || mouse.row < body.y
+                    || mouse.column >= body.x.saturating_add(body.width)
+                    || mouse.row >= body.y.saturating_add(body.height)
+                {
+                    return;
+                }
+                let line = self.scroll + usize::from(mouse.row.saturating_sub(body.y));
+                self.open_image_at_line(line);
+            }
+            _ => {}
         }
     }
 
@@ -776,7 +744,7 @@ impl DetailApp {
         self.scroll = self.scroll.saturating_add_signed(delta).min(max);
     }
 
-    fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers, line_count: usize) -> bool {
+    pub(super) fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers, line_count: usize) -> bool {
         let Some(token) = config::key_token(code, mods) else {
             return false;
         };
@@ -917,6 +885,7 @@ impl DetailApp {
             config::internal::GITHUB_MERGE => self.merge_pull(),
             config::internal::GITHUB_RERUN_FAILED => self.rerun(true),
             config::internal::GITHUB_RERUN_ALL => self.rerun(false),
+            config::internal::OPEN => self.open_first_visible_image(),
             _ => {}
         }
         false
@@ -969,10 +938,8 @@ impl DetailApp {
         };
         let plain = |lines: Vec<Line<'static>>| (lines, Vec::new());
         match (detail, self.active_tab()) {
-            (Detail::Issue(issue), _) => issue_page(issue, width, palette, self.images_enabled),
-            (Detail::Pull(pull), Tab::Conversation) => {
-                pull_page(pull, width, palette, self.images_enabled)
-            }
+            (Detail::Issue(issue), _) => issue_page(issue, width, palette),
+            (Detail::Pull(pull), Tab::Conversation) => pull_page(pull, width, palette),
             (Detail::Pull(pull), Tab::Files) => plain(pull_files(pull, palette)),
             (Detail::Pull(_), Tab::Diff) => plain({
                 if let Some(error) = &self.patch_error {
@@ -1111,6 +1078,7 @@ impl DetailApp {
             height: area.height.saturating_sub(2 + footer_height),
         };
         self.body_height = body.height;
+        self.body_area = body;
         let render_key = (self.active_tab(), body.width, self.content_revision);
         if self.rendered_key != Some(render_key) {
             let (lines, images) = self.build_lines(body.width, palette);
@@ -1133,20 +1101,21 @@ impl DetailApp {
             ),
             body,
         );
-        self.render_images(frame, body);
 
         if footer_height == 1 {
             let hints = if self.mutation_loading {
                 "working…".to_string()
+            } else if self.image_loading {
+                "downloading image…".to_string()
             } else if let Some((message, _, _)) = &self.notice {
                 message.clone()
             } else {
                 match self.resource {
                     DetailResource::Issue(_) => {
-                        "c reply  x close/reopen  h/l tabs  r refresh  q back".into()
+                        "c reply  o image  x close/reopen  h/l tabs  r refresh  q back".into()
                     }
                     DetailResource::Pull(_) => {
-                        "c reply  a approve  x changes  m merge  D close  d diff".into()
+                        "c reply  o image  a approve  x changes  m merge  D close  d diff".into()
                     }
                     DetailResource::Run(_) => {
                         "x cancel  R failed  A rerun all  f/L logs  h/l tabs".into()
@@ -1296,11 +1265,7 @@ pub fn run(repo: String, resource: DetailResource, initial: InitialView) -> io::
                         break;
                     }
                 }
-                Event::Mouse(mouse) => match mouse.kind {
-                    MouseEventKind::ScrollDown => app.scroll_by(3, line_count),
-                    MouseEventKind::ScrollUp => app.scroll_by(-3, line_count),
-                    _ => {}
-                },
+                Event::Mouse(mouse) => app.handle_mouse(mouse),
                 _ => {}
             }
         }
@@ -1366,7 +1331,7 @@ impl Drop for DetailTerminal {
     }
 }
 
-fn tabs_for(resource: DetailResource) -> &'static [Tab] {
+pub(super) fn tabs_for(resource: DetailResource) -> &'static [Tab] {
     match resource {
         // Issue/PR overview and comments now live on one scrollable page.
         DetailResource::Issue(_) => &[Tab::Conversation],
@@ -1375,990 +1340,3 @@ fn tabs_for(resource: DetailResource) -> &'static [Tab] {
     }
 }
 
-fn state_color(state: &str, palette: &Palette) -> Color {
-    match state.to_ascii_lowercase().as_str() {
-        "open" | "success" | "completed" => palette.green,
-        "merged" => palette.mauve,
-        "failure" | "failed" | "closed" | "cancelled" | "timed_out" => palette.red,
-        "in_progress" | "queued" | "pending" | "loading" => palette.yellow,
-        _ => palette.overlay1,
-    }
-}
-
-fn actor(actor: Option<&crate::github::Actor>) -> &str {
-    actor.map(|actor| actor.login.as_str()).unwrap_or("unknown")
-}
-
-fn styled_text(text: &str, width: usize, style: Style) -> Vec<Line<'static>> {
-    wrap_text(text, width)
-        .into_iter()
-        .map(|line| Line::styled(line, style))
-        .collect()
-}
-
-/// Fetch and decode a remote image. Best-effort; bounded size and default
-/// ureq timeouts keep a bad URL from stalling the client.
-fn fetch_image(url: &str) -> Result<image::DynamicImage, String> {
-    if !(url.starts_with("http://") || url.starts_with("https://")) {
-        return Err("unsupported image url".into());
-    }
-    let mut response = ureq::get(url).call().map_err(|error| error.to_string())?;
-    let mut bytes = Vec::new();
-    response
-        .body_mut()
-        .as_reader()
-        .take(MAX_IMAGE_BYTES as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|error| error.to_string())?;
-    image::load_from_memory(&bytes).map_err(|error| error.to_string())
-}
-
-/// A rendered page: styled lines plus any image placements (by line index).
-struct Page {
-    lines: Vec<Line<'static>>,
-    images: Vec<ImagePlacement>,
-}
-
-impl Page {
-    fn new() -> Self {
-        Self {
-            lines: Vec::new(),
-            images: Vec::new(),
-        }
-    }
-
-    fn blank(&mut self) {
-        self.lines.push(Line::raw(String::new()));
-    }
-
-    fn push(&mut self, line: Line<'static>) {
-        self.lines.push(line);
-    }
-
-    fn rule(&mut self, width: usize, palette: &Palette) {
-        self.lines.push(Line::styled(
-            "─".repeat(width),
-            Style::default().fg(palette.surface1),
-        ));
-    }
-
-    fn markdown(&mut self, text: &str, width: usize, palette: &Palette, images_enabled: bool) {
-        let (lines, images) = render_markdown(text, width, palette, images_enabled);
-        let base = self.lines.len();
-        let rows = image_rows();
-        for (offset, url) in images {
-            self.images.push(ImagePlacement {
-                line: base + offset,
-                url,
-                rows,
-            });
-        }
-        self.lines.extend(lines);
-    }
-
-    fn into_parts(self) -> (Vec<Line<'static>>, Vec<ImagePlacement>) {
-        (self.lines, self.images)
-    }
-}
-
-/// Markdown → styled ratatui lines using pulldown-cmark for parsing. Returns
-/// the lines and `(line_index, url)` for any images (as reserved blank rows).
-fn render_markdown(
-    text: &str,
-    width: usize,
-    palette: &Palette,
-    images_enabled: bool,
-) -> (Vec<Line<'static>>, Vec<(usize, String)>) {
-    if text.trim().is_empty() {
-        return (
-            vec![Line::styled(
-                "(no description)",
-                Style::default().fg(palette.overlay1),
-            )],
-            Vec::new(),
-        );
-    }
-    let rows = usize::from(image_rows());
-    let mut out: Vec<Line<'static>> = Vec::new();
-    let mut images: Vec<(usize, String)> = Vec::new();
-    let mut segs: Vec<(String, Style)> = Vec::new();
-    let (mut bold, mut italic, mut strike, mut link) = (false, false, false, false);
-    let mut heading: Option<HeadingLevel> = None;
-    let mut quote_depth: usize = 0;
-    let mut in_code = false;
-    let mut list_stack: Vec<Option<u64>> = Vec::new();
-    let mut item_pending_marker: Option<String> = None;
-    let mut image_url: Option<String> = None;
-
-    let seg_style = |bold: bool,
-                     italic: bool,
-                     strike: bool,
-                     link: bool,
-                     heading: Option<HeadingLevel>,
-                     quote: usize| {
-        if let Some(_level) = heading {
-            return Style::default()
-                .fg(palette.accent)
-                .add_modifier(Modifier::BOLD);
-        }
-        let mut style = if quote > 0 {
-            Style::default()
-                .fg(palette.subtext0)
-                .add_modifier(Modifier::ITALIC)
-        } else {
-            Style::default().fg(palette.text)
-        };
-        if bold {
-            style = style.add_modifier(Modifier::BOLD);
-        }
-        if italic {
-            style = style.add_modifier(Modifier::ITALIC);
-        }
-        if strike {
-            style = style.add_modifier(Modifier::CROSSED_OUT);
-        }
-        if link {
-            style = style.fg(palette.blue).add_modifier(Modifier::UNDERLINED);
-        }
-        style
-    };
-
-    let quote_prefix = |depth: usize| "▏ ".repeat(depth);
-
-    let parser = Parser::new_ext(
-        text,
-        Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS,
-    );
-    for event in parser {
-        match event {
-            MdEvent::Start(Tag::Paragraph | Tag::Heading { .. }) => {
-                if let Tag::Heading { level, .. } = event_heading(&event) {
-                    heading = Some(level);
-                }
-                segs.clear();
-            }
-            MdEvent::End(TagEnd::Paragraph | TagEnd::Heading(_)) => {
-                let prefix = quote_prefix(quote_depth);
-                let first = item_pending_marker.take();
-                flush_block(
-                    &mut out,
-                    &mut segs,
-                    width,
-                    &prefix,
-                    first.as_deref(),
-                    palette,
-                );
-                heading = None;
-                out.push(Line::raw(String::new()));
-            }
-            MdEvent::Start(Tag::Strong) => bold = true,
-            MdEvent::End(TagEnd::Strong) => bold = false,
-            MdEvent::Start(Tag::Emphasis) => italic = true,
-            MdEvent::End(TagEnd::Emphasis) => italic = false,
-            MdEvent::Start(Tag::Strikethrough) => strike = true,
-            MdEvent::End(TagEnd::Strikethrough) => strike = false,
-            MdEvent::Start(Tag::Link { .. }) => link = true,
-            MdEvent::End(TagEnd::Link) => link = false,
-            MdEvent::Start(Tag::BlockQuote(_)) => quote_depth += 1,
-            MdEvent::End(TagEnd::BlockQuote(_)) => quote_depth = quote_depth.saturating_sub(1),
-            MdEvent::Start(Tag::List(start)) => list_stack.push(start),
-            MdEvent::End(TagEnd::List(_)) => {
-                list_stack.pop();
-            }
-            MdEvent::Start(Tag::Item) => {
-                let marker = match list_stack.last_mut() {
-                    Some(Some(n)) => {
-                        let marker = format!("{n}. ");
-                        *n += 1;
-                        marker
-                    }
-                    _ => "• ".to_string(),
-                };
-                item_pending_marker = Some(marker);
-                segs.clear();
-            }
-            MdEvent::End(TagEnd::Item) => {
-                let prefix = quote_prefix(quote_depth);
-                let first = item_pending_marker.take();
-                flush_block(
-                    &mut out,
-                    &mut segs,
-                    width,
-                    &prefix,
-                    first.as_deref(),
-                    palette,
-                );
-            }
-            MdEvent::Start(Tag::CodeBlock(_)) => {
-                flush_block(&mut out, &mut segs, width, "", None, palette);
-                in_code = true;
-            }
-            MdEvent::End(TagEnd::CodeBlock) => {
-                in_code = false;
-                out.push(Line::raw(String::new()));
-            }
-            MdEvent::Start(Tag::Image { dest_url, .. }) => {
-                image_url = Some(dest_url.to_string());
-                segs.clear();
-            }
-            MdEvent::End(TagEnd::Image) => {
-                let alt: String = std::mem::take(&mut segs)
-                    .into_iter()
-                    .map(|(text, _)| text)
-                    .collect();
-                if let Some(url) = image_url.take() {
-                    flush_block(&mut out, &mut segs, width, "", None, palette);
-                    if images_enabled {
-                        images.push((out.len(), url));
-                        for _ in 0..rows {
-                            out.push(Line::raw(String::new()));
-                        }
-                    } else {
-                        let label = if alt.trim().is_empty() {
-                            "image"
-                        } else {
-                            alt.trim()
-                        };
-                        out.push(Line::styled(
-                            format!("⬜ {label}  ({url})"),
-                            Style::default().fg(palette.overlay1),
-                        ));
-                    }
-                }
-            }
-            MdEvent::Text(text) => {
-                if in_code {
-                    for line in text.lines() {
-                        out.push(Line::styled(
-                            format!("  {line}"),
-                            Style::default().fg(palette.yellow).bg(palette.surface0),
-                        ));
-                    }
-                } else {
-                    segs.push((
-                        text.to_string(),
-                        seg_style(bold, italic, strike, link, heading, quote_depth),
-                    ));
-                }
-            }
-            MdEvent::Code(code) => segs.push((
-                code.to_string(),
-                Style::default().fg(palette.yellow).bg(palette.surface0),
-            )),
-            MdEvent::SoftBreak | MdEvent::HardBreak => {
-                segs.push((" ".to_string(), Style::default()))
-            }
-            MdEvent::Rule => {
-                flush_block(&mut out, &mut segs, width, "", None, palette);
-                out.push(Line::styled(
-                    "─".repeat(width),
-                    Style::default().fg(palette.surface1),
-                ));
-            }
-            MdEvent::TaskListMarker(done) => segs.push((
-                if done { "[x] ".into() } else { "[ ] ".into() },
-                Style::default().fg(palette.accent),
-            )),
-            _ => {}
-        }
-    }
-    flush_block(&mut out, &mut segs, width, "", None, palette);
-    while out.last().is_some_and(|line| line.width() == 0) {
-        out.pop();
-    }
-    (out, images)
-}
-
-fn event_heading(event: &MdEvent) -> Tag<'static> {
-    if let MdEvent::Start(Tag::Heading { level, .. }) = event {
-        Tag::Heading {
-            level: *level,
-            id: None,
-            classes: Vec::new(),
-            attrs: Vec::new(),
-        }
-    } else {
-        Tag::Paragraph
-    }
-}
-
-/// Wrap styled segments into lines, applying a first-line marker + continuation
-/// indent so list bullets and blockquote bars align.
-fn flush_block(
-    out: &mut Vec<Line<'static>>,
-    segs: &mut Vec<(String, Style)>,
-    width: usize,
-    prefix: &str,
-    first_marker: Option<&str>,
-    palette: &Palette,
-) {
-    if segs.is_empty() {
-        return;
-    }
-    let marker = first_marker.unwrap_or("");
-    let cont_indent = " ".repeat(marker.chars().count());
-    let prefix_style = Style::default().fg(palette.overlay1);
-    let avail = width
-        .saturating_sub(prefix.chars().count() + marker.chars().count())
-        .max(1);
-
-    // Split segments into styled words.
-    let mut words: Vec<(String, Style)> = Vec::new();
-    for (text, style) in segs.drain(..) {
-        let mut first = true;
-        for word in text.split(' ') {
-            if word.is_empty() {
-                continue;
-            }
-            let _ = first;
-            first = false;
-            words.push((word.to_string(), style));
-        }
-    }
-    if words.is_empty() {
-        return;
-    }
-
-    let mut rows: Vec<Vec<Span<'static>>> = Vec::new();
-    let mut current: Vec<Span<'static>> = Vec::new();
-    let mut used = 0usize;
-    for (word, style) in words {
-        let word_len = word.chars().count();
-        let extra = usize::from(!current.is_empty()) + word_len;
-        if !current.is_empty() && used + extra > avail {
-            rows.push(std::mem::take(&mut current));
-            used = 0;
-        }
-        if !current.is_empty() {
-            current.push(Span::raw(" "));
-            used += 1;
-        }
-        current.push(Span::styled(word, style));
-        used += word_len;
-    }
-    if !current.is_empty() {
-        rows.push(current);
-    }
-
-    for (index, mut spans) in rows.into_iter().enumerate() {
-        let mut line_spans = Vec::new();
-        if !prefix.is_empty() {
-            line_spans.push(Span::styled(prefix.to_string(), prefix_style));
-        }
-        if index == 0 && !marker.is_empty() {
-            line_spans.push(Span::styled(marker.to_string(), prefix_style));
-        } else if !cont_indent.is_empty() {
-            line_spans.push(Span::raw(cont_indent.clone()));
-        }
-        line_spans.append(&mut spans);
-        out.push(Line::from(line_spans));
-    }
-}
-
-fn wrap_text(text: &str, width: usize) -> Vec<String> {
-    let width = width.max(1);
-    if text.is_empty() {
-        return vec![String::new()];
-    }
-    let mut output = Vec::new();
-    for raw in text.lines() {
-        if raw.is_empty() {
-            output.push(String::new());
-            continue;
-        }
-        let mut line = String::new();
-        for word in raw.split_whitespace() {
-            let extra = usize::from(!line.is_empty()) + word.chars().count();
-            if !line.is_empty() && line.chars().count() + extra > width {
-                output.push(std::mem::take(&mut line));
-            }
-            if !line.is_empty() {
-                line.push(' ');
-            }
-            line.push_str(word);
-        }
-        if !line.is_empty() {
-            output.push(line);
-        }
-    }
-    output
-}
-
-fn metadata_line(parts: &[String], palette: &Palette) -> Line<'static> {
-    Line::styled(parts.join("  ·  "), Style::default().fg(palette.subtext0))
-}
-
-fn comment_header(login: &str, timestamp: &str, palette: &Palette) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(
-            login.to_string(),
-            Style::default()
-                .fg(palette.text)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("  ·  {timestamp}"),
-            Style::default().fg(palette.subtext0),
-        ),
-    ])
-}
-
-/// Issue overview + all comments on one scrollable page.
-fn issue_page(
-    issue: &IssueDetail,
-    width: usize,
-    palette: &Palette,
-    images_enabled: bool,
-) -> (Vec<Line<'static>>, Vec<ImagePlacement>) {
-    let labels = issue
-        .labels
-        .iter()
-        .map(|label| label.name.as_str())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let mut page = Page::new();
-    page.push(metadata_line(
-        &[
-            actor(issue.author.as_ref()).to_string(),
-            if labels.is_empty() {
-                "no labels".into()
-            } else {
-                labels
-            },
-            issue.updated_at.clone(),
-        ],
-        palette,
-    ));
-    page.blank();
-    page.markdown(&issue.body, width, palette, images_enabled);
-    for comment in &issue.comments {
-        page.blank();
-        page.rule(width, palette);
-        page.push(comment_header(
-            actor(comment.author.as_ref()),
-            &comment.created_at,
-            palette,
-        ));
-        page.blank();
-        page.markdown(&comment.body, width, palette, images_enabled);
-    }
-    page.into_parts()
-}
-
-/// PR overview + conversation + reviews on one scrollable page.
-fn pull_page(
-    pull: &PullRequestDetail,
-    width: usize,
-    palette: &Palette,
-    images_enabled: bool,
-) -> (Vec<Line<'static>>, Vec<ImagePlacement>) {
-    let mut page = Page::new();
-    page.push(metadata_line(
-        &[
-            actor(pull.author.as_ref()).to_string(),
-            format!("{} → {}", pull.head_ref_name, pull.base_ref_name),
-            format!("+{} -{}", pull.additions, pull.deletions),
-            format!("{} files", pull.changed_files),
-        ],
-        palette,
-    ));
-    page.push(metadata_line(
-        &[
-            format!("review {}", display_or(&pull.review_decision, "pending")),
-            format!("merge {}", display_or(&pull.mergeable, "unknown")),
-            display_or(&pull.merge_state_status, "unknown").to_string(),
-        ],
-        palette,
-    ));
-    page.blank();
-    page.markdown(&pull.body, width, palette, images_enabled);
-    for comment in &pull.comments {
-        page.blank();
-        page.rule(width, palette);
-        page.push(comment_header(
-            actor(comment.author.as_ref()),
-            &comment.created_at,
-            palette,
-        ));
-        page.blank();
-        page.markdown(&comment.body, width, palette, images_enabled);
-    }
-    for review in &pull.reviews {
-        page.blank();
-        page.rule(width, palette);
-        page.push(review_header(review, palette));
-        if !review.body.is_empty() {
-            page.blank();
-            page.markdown(&review.body, width, palette, images_enabled);
-        }
-    }
-    page.into_parts()
-}
-
-fn review_header(review: &Review, palette: &Palette) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(
-            actor(review.author.as_ref()).to_string(),
-            Style::default()
-                .fg(palette.text)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("  ·  ", Style::default().fg(palette.overlay1)),
-        Span::styled(
-            review.state.clone(),
-            Style::default().fg(state_color(&review.state, palette)),
-        ),
-        Span::styled(
-            format!("  ·  {}", review.submitted_at),
-            Style::default().fg(palette.subtext0),
-        ),
-    ])
-}
-
-fn pull_files(pull: &PullRequestDetail, palette: &Palette) -> Vec<Line<'static>> {
-    if pull.files.is_empty() {
-        return vec![Line::styled(
-            "No changed files",
-            Style::default().fg(palette.overlay1),
-        )];
-    }
-    pull.files
-        .iter()
-        .map(|file| {
-            Line::from(vec![
-                Span::styled(
-                    format!("+{} ", file.additions),
-                    Style::default().fg(palette.green),
-                ),
-                Span::styled(
-                    format!("-{} ", file.deletions),
-                    Style::default().fg(palette.red),
-                ),
-                Span::styled(file.path.clone(), Style::default().fg(palette.text)),
-            ])
-        })
-        .collect()
-}
-
-fn patch_lines(patch: &str, width: usize, palette: &Palette) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
-    for raw in patch.lines() {
-        let style =
-            if raw.starts_with("diff --git") || raw.starts_with("+++") || raw.starts_with("---") {
-                Style::default()
-                    .fg(palette.text)
-                    .add_modifier(Modifier::BOLD)
-            } else if raw.starts_with("@@") {
-                Style::default().fg(palette.blue)
-            } else if raw.starts_with('+') {
-                Style::default().fg(palette.green).bg(palette.surface0)
-            } else if raw.starts_with('-') {
-                Style::default().fg(palette.red).bg(palette.surface0)
-            } else {
-                Style::default().fg(palette.subtext0)
-            };
-        for line in wrap_text(raw, width) {
-            lines.push(Line::styled(line, style));
-        }
-    }
-    lines
-}
-
-fn check_lines(checks: &Value, palette: &Palette) -> Vec<Line<'static>> {
-    let Some(checks) = checks.as_array() else {
-        return vec![Line::styled(
-            "No checks",
-            Style::default().fg(palette.overlay1),
-        )];
-    };
-    if checks.is_empty() {
-        return vec![Line::styled(
-            "No checks",
-            Style::default().fg(palette.overlay1),
-        )];
-    }
-    checks
-        .iter()
-        .map(|check| {
-            let state = check
-                .get("conclusion")
-                .or_else(|| check.get("state"))
-                .or_else(|| check.get("status"))
-                .and_then(Value::as_str)
-                .unwrap_or("pending");
-            let name = check
-                .get("name")
-                .or_else(|| check.get("context"))
-                .and_then(Value::as_str)
-                .unwrap_or("check");
-            let glyph = match state.to_ascii_lowercase().as_str() {
-                "success" | "completed" => "✓",
-                "failure" | "failed" | "error" | "timed_out" => "×",
-                _ => "…",
-            };
-            Line::from(vec![
-                Span::styled(
-                    format!("{glyph} "),
-                    Style::default().fg(state_color(state, palette)),
-                ),
-                Span::styled(name.to_string(), Style::default().fg(palette.text)),
-                Span::styled(format!("  {state}"), Style::default().fg(palette.subtext0)),
-            ])
-        })
-        .collect()
-}
-
-fn run_overview(run: &WorkflowRunDetail, width: usize, palette: &Palette) -> Vec<Line<'static>> {
-    let mut lines = vec![
-        metadata_line(
-            &[
-                run.event.clone(),
-                run.head_branch.clone(),
-                short_sha(&run.head_sha),
-                format!("attempt {}", run.attempt),
-            ],
-            palette,
-        ),
-        Line::raw(String::new()),
-    ];
-    lines.extend(
-        wrap_text(&run.display_title, width)
-            .into_iter()
-            .map(|line| {
-                Line::styled(
-                    line,
-                    Style::default()
-                        .fg(palette.text)
-                        .add_modifier(Modifier::BOLD),
-                )
-            }),
-    );
-    lines.push(Line::raw(String::new()));
-    lines.push(metadata_line(
-        &[run.created_at.clone(), run.updated_at.clone()],
-        palette,
-    ));
-    lines
-}
-
-fn run_jobs(run: &WorkflowRunDetail, palette: &Palette) -> Vec<Line<'static>> {
-    if run.jobs.is_empty() {
-        return vec![Line::styled(
-            "No jobs",
-            Style::default().fg(palette.overlay1),
-        )];
-    }
-    let mut lines = Vec::new();
-    for job in &run.jobs {
-        let state = if job.status == "completed" {
-            &job.conclusion
-        } else {
-            &job.status
-        };
-        let glyph = match state.as_str() {
-            "success" => "✓",
-            "failure" | "timed_out" => "×",
-            "cancelled" => "■",
-            _ => "…",
-        };
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("{glyph} "),
-                Style::default().fg(state_color(state, palette)),
-            ),
-            Span::styled(
-                job.name.clone(),
-                Style::default()
-                    .fg(palette.text)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]));
-        for step in &job.steps {
-            let state = if step.status == "completed" {
-                &step.conclusion
-            } else {
-                &step.status
-            };
-            let glyph = if state == "success" {
-                "✓"
-            } else if state == "failure" {
-                "×"
-            } else {
-                "·"
-            };
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!("   {glyph} "),
-                    Style::default().fg(state_color(state, palette)),
-                ),
-                Span::styled(step.name.clone(), Style::default().fg(palette.subtext0)),
-            ]));
-        }
-        lines.push(Line::raw(String::new()));
-    }
-    lines
-}
-
-fn log_lines(log: &str, width: usize, palette: &Palette) -> Vec<Line<'static>> {
-    log.lines()
-        .flat_map(|raw| {
-            let lower = raw.to_ascii_lowercase();
-            let style = if lower.contains("error") || lower.contains("failed") {
-                Style::default().fg(palette.red)
-            } else if lower.contains("warning") {
-                Style::default().fg(palette.yellow)
-            } else {
-                Style::default().fg(palette.subtext0)
-            };
-            wrap_text(raw, width)
-                .into_iter()
-                .map(move |line| Line::styled(line, style))
-        })
-        .collect()
-}
-
-fn display_or<'a>(value: &'a str, fallback: &'a str) -> &'a str {
-    if value.is_empty() {
-        fallback
-    } else {
-        value
-    }
-}
-
-fn short_sha(sha: &str) -> String {
-    sha.chars().take(8).collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    struct FakeAdapter;
-
-    impl GitHubDetailAdapter for FakeAdapter {
-        fn issue_detail(&self, _repo: &str, _number: u64) -> Result<IssueDetail, String> {
-            Err("unused".into())
-        }
-
-        fn pull_detail(&self, _repo: &str, _number: u64) -> Result<PullRequestDetail, String> {
-            Err("unused".into())
-        }
-
-        fn run_detail(&self, _repo: &str, _run_id: u64) -> Result<WorkflowRunDetail, String> {
-            Err("unused".into())
-        }
-
-        fn pull_patch(&self, _repo: &str, _number: u64) -> Result<String, String> {
-            Err("unused".into())
-        }
-
-        fn run_log(&self, _repo: &str, _run_id: u64, _failed_only: bool) -> Result<String, String> {
-            Err("unused".into())
-        }
-
-        fn mutate(&self, _repo: &str, _mutation: &GitHubMutation) -> Result<String, String> {
-            Ok(String::new())
-        }
-    }
-
-    fn app(resource: DetailResource) -> DetailApp {
-        DetailApp::with_adapter(
-            "owner/repo".into(),
-            resource,
-            InitialView::Overview,
-            Arc::new(Config::for_test()),
-            Arc::new(FakeAdapter),
-        )
-    }
-
-    struct RecordingAdapter {
-        mutations: Arc<std::sync::Mutex<Vec<GitHubMutation>>>,
-    }
-
-    impl GitHubDetailAdapter for RecordingAdapter {
-        fn issue_detail(&self, _repo: &str, _number: u64) -> Result<IssueDetail, String> {
-            Err("unused".into())
-        }
-
-        fn pull_detail(&self, _repo: &str, _number: u64) -> Result<PullRequestDetail, String> {
-            Err("unused".into())
-        }
-
-        fn run_detail(&self, _repo: &str, _run_id: u64) -> Result<WorkflowRunDetail, String> {
-            Err("unused".into())
-        }
-
-        fn pull_patch(&self, _repo: &str, _number: u64) -> Result<String, String> {
-            Err("unused".into())
-        }
-
-        fn run_log(&self, _repo: &str, _run_id: u64, _failed_only: bool) -> Result<String, String> {
-            Err("unused".into())
-        }
-
-        fn mutate(&self, _repo: &str, mutation: &GitHubMutation) -> Result<String, String> {
-            self.mutations.lock().unwrap().push(mutation.clone());
-            Ok(String::new())
-        }
-    }
-
-    #[test]
-    fn wraps_text_without_losing_words() {
-        assert_eq!(wrap_text("one two three", 7), vec!["one two", "three"]);
-    }
-
-    #[test]
-    fn resource_tabs_are_context_specific() {
-        // Issue/PR overview and comments now share one Conversation page.
-        assert_eq!(tabs_for(DetailResource::Issue(1)), &[Tab::Conversation]);
-        assert_eq!(
-            tabs_for(DetailResource::Pull(2)),
-            &[Tab::Conversation, Tab::Files, Tab::Diff, Tab::Checks]
-        );
-        assert_eq!(
-            tabs_for(DetailResource::Run(3)),
-            &[Tab::Overview, Tab::Jobs, Tab::Log]
-        );
-    }
-
-    #[test]
-    fn markdown_renders_headings_lists_and_extracts_images() {
-        let palette = Palette::resolve();
-        let (lines, images) = render_markdown(
-            "# Title\n\nsome **bold** text\n\n- one\n- two\n\n![alt](https://example.test/a.png)",
-            60,
-            &palette,
-            true,
-        );
-        assert!(lines
-            .iter()
-            .any(|line| line.spans.iter().any(|span| span.content.contains("Title"))));
-        assert!(lines
-            .iter()
-            .any(|line| line.spans.iter().any(|span| span.content.contains('•'))));
-        assert_eq!(images.len(), 1);
-        assert_eq!(images[0].1, "https://example.test/a.png");
-    }
-
-    #[test]
-    fn images_off_keeps_a_textual_placeholder_and_no_placements() {
-        let palette = Palette::resolve();
-        let (lines, images) = render_markdown(
-            "![diagram](https://example.test/x.png)",
-            60,
-            &palette,
-            false,
-        );
-        assert!(images.is_empty());
-        assert!(lines.iter().any(|line| line
-            .spans
-            .iter()
-            .any(|span| span.content.contains("diagram"))));
-    }
-
-    #[test]
-    fn compose_submission_becomes_a_typed_comment_mutation() {
-        let mutations = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let adapter = Arc::new(RecordingAdapter {
-            mutations: Arc::clone(&mutations),
-        });
-        let mut app = DetailApp::with_adapter(
-            "owner/repo".into(),
-            DetailResource::Issue(7),
-            InitialView::Overview,
-            Arc::new(Config::for_test()),
-            adapter,
-        );
-        app.mode = Mode::Compose {
-            kind: ComposeKind::Comment,
-            text: "hello from Corral".chars().collect(),
-        };
-        app.submit_compose();
-        for _ in 0..20 {
-            if !mutations.lock().unwrap().is_empty() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        assert_eq!(
-            mutations.lock().unwrap().as_slice(),
-            &[GitHubMutation::IssueComment {
-                number: 7,
-                body: "hello from Corral".into(),
-            }]
-        );
-    }
-
-    #[test]
-    fn context_actions_are_typed_and_destructive_actions_confirm() {
-        let mut issue_app = app(DetailResource::Issue(7));
-        issue_app.detail = Some(Detail::Issue(
-            serde_json::from_str(r#"{"number":7,"title":"bug","state":"OPEN"}"#).unwrap(),
-        ));
-        issue_app.context_action();
-        assert!(matches!(
-            issue_app.mode,
-            Mode::Confirm {
-                mutation: GitHubMutation::IssueState {
-                    number: 7,
-                    open: false
-                },
-                ..
-            }
-        ));
-
-        let mut pull_app = app(DetailResource::Pull(8));
-        pull_app.detail = Some(Detail::Pull(
-            serde_json::from_str(
-                r#"{"number":8,"title":"feature","state":"OPEN","headRefOid":"abcdef123456","statusCheckRollup":[]}"#,
-            )
-            .unwrap(),
-        ));
-        pull_app.merge_pull();
-        assert!(matches!(
-            pull_app.mode,
-            Mode::MergeMethod {
-                number: 8,
-                selected: 1,
-                ..
-            }
-        ));
-        pull_app.confirm_selected_merge();
-        assert!(matches!(
-            pull_app.mode,
-            Mode::Confirm {
-                mutation: GitHubMutation::PullMerge {
-                    number: 8,
-                    method: MergeMethod::Squash,
-                    ..
-                },
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn merge_method_picker_cycles_and_confirms_selected_strategy() {
-        let mut pull_app = app(DetailResource::Pull(9));
-        pull_app.detail = Some(Detail::Pull(
-            serde_json::from_str(
-                r#"{"number":9,"title":"feature","state":"OPEN","isDraft":false,"headRefOid":"abcdef123456","statusCheckRollup":[]}"#,
-            )
-            .unwrap(),
-        ));
-        pull_app.merge_pull();
-        pull_app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE, 10);
-        pull_app.confirm_selected_merge();
-        assert!(matches!(
-            pull_app.mode,
-            Mode::Confirm {
-                mutation: GitHubMutation::PullMerge {
-                    number: 9,
-                    method: MergeMethod::Rebase,
-                    ..
-                },
-                ..
-            }
-        ));
-    }
-}

@@ -1,11 +1,17 @@
 //! GitHub boundary for Corral.
 //!
 //! Authentication, host selection, and API compatibility belong to `gh`; the
-//! TUI consumes typed models through [`GitHubAdapter`] and never handles tokens.
+//! sidebar and full-width detail client both consume typed models through
+//! [`GitHubAdapter`] / [`GitHubDetailAdapter`] and never handle tokens.
+//!
+//! - [`gh`] / [`model`] — CLI adapter + DTOs (data layer)
+//! - [`detail`] — full-width `corral-github` interactive client
 
 mod gh;
 mod model;
+pub mod detail;
 
+pub use detail::{run as run_detail, DetailResource, InitialView};
 pub use gh::GhCli;
 pub use model::{
     parse_workflow_dispatch, Actor, Comment, Issue, IssueDetail, PullFile, PullRequest,

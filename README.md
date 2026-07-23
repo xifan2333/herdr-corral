@@ -31,6 +31,27 @@ herdr plugin link .
 herdr plugin action invoke corral.open
 ```
 
+## 发布 / Arch
+
+打 `v*` tag 会跑 `.github/workflows/release.yml`，上传：
+
+- `herdr-corral-<ver>-x86_64.tar.xz`
+- `herdr-corral-<ver>-aarch64.tar.xz`
+
+手动安装 tarball：
+
+```bash
+tar -xJf herdr-corral-<ver>-x86_64.tar.xz
+cd herdr-corral-<ver>-x86_64
+./install.sh   # PATH 含 ~/.local/bin → ~/.local，否则 /usr
+```
+
+AUR 包在 [aur-auto](https://github.com/xifan2333/aur-auto) 的 `herdr-corral-bin`：
+
+```bash
+yay -S herdr-corral-bin
+```
+
 所有快捷键均由可编辑的 `config.sh` 通过 `corral bind <key> <action>`
 注入，程序内不保留默认键位分支。配置使用 `CORRAL_CONFIG_VERSION`
 标记版本，供后续非破坏式迁移。默认配置中：`1`/`2`/`3` 切 feature，
@@ -70,7 +91,9 @@ GitHub：依赖已登录的 [GitHub CLI](https://cli.github.com/) `gh`，不在 
 回复和 Close/Reopen；PR 提供 Conversation、Files、Diff、Checks、回复、Approve、
 Request Changes、merge method picker（merge/squash/rebase + head SHA 确认）和 Close/Reopen；
 Workflows 是独立 section，列出 active workflow，支持 `workflow_dispatch` 参数表单；
-Actions 提供 Summary、Jobs、logs、Cancel、Rerun Failed/All。Workflow Dispatch 使用
+Actions 提供 Summary、Jobs、logs、Cancel、Rerun Failed/All。Issue/PR 正文中的图片
+渲染为 `[image] ...` 文本链接：鼠标点击或按 `o` 下载到缓存并用 `imv` 打开
+（`CORRAL_GITHUB_IMAGE_VIEWER` 可覆盖）。Workflow Dispatch 使用
 `t`/`Enter`，有 inputs 时先填表再确认，无 inputs 时直接确认，触发到默认分支。所有
 网络和 mutation 均在后台运行，正文通过 stdin 传给 `gh`，破坏性操作必须确认。
 GitHub Enterprise 使用
@@ -92,7 +115,7 @@ corral-github run --repo owner/repo 789 --view jobs
 | `feature` | Explorer / SCM / GitHub |
 | `git` | 仓库发现、status 解析、stage / unstage |
 | `github` | `gh` adapter、仓库身份和 typed models |
-| `github_detail` / `corral-github` | Issue / PR / Actions 全宽交互客户端 |
+| `github::detail` / `corral-github` | Issue / PR / Actions 全宽交互客户端 |
 | `diffview` / `corral-diff` | 独立主题化 diff 过滤器 |
 | `layout` | activity + body 几何 |
 | `app` | sidebar 事件循环 |

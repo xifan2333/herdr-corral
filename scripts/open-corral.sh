@@ -11,7 +11,8 @@ herdr_bin="$(command -v "$herdr_bin" 2>/dev/null || printf '%s' "$herdr_bin")"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 plugin_root="$(cd "$script_dir/.." && pwd)"
 bin="$plugin_root/target/release/corral"
-config_dir="${HERDR_PLUGIN_CONFIG_DIR:-$("$herdr_bin" plugin config-dir corral 2>/dev/null || true)}"
+# User config is always ${XDG_CONFIG_HOME:-~/.config}/corral/config.sh (see
+# config::config_dir). Host mode is $HERDR_ENV / $HERDR_BIN_PATH inside shell.
 [ -x "$bin" ] || exit 1
 
 # Focus by id (Herdr has no dedicated focus-by-id command).
@@ -132,8 +133,8 @@ if ! "$herdr_bin" pane swap --source-pane "$np" --target-pane "$target" >/dev/nu
   cleanup_new
   exit 1
 fi
-printf -v run_cmd 'exec env HERDR_ENV=1 HERDR_BIN_PATH=%q HERDR_PLUGIN_ID=corral HERDR_PLUGIN_ENTRYPOINT_ID=sidebar HERDR_PLUGIN_ROOT=%q HERDR_PLUGIN_CONFIG_DIR=%q %q' \
-  "$herdr_bin" "$plugin_root" "$config_dir" "$bin"
+printf -v run_cmd 'exec env HERDR_ENV=1 HERDR_BIN_PATH=%q HERDR_PLUGIN_ID=corral HERDR_PLUGIN_ENTRYPOINT_ID=sidebar HERDR_PLUGIN_ROOT=%q %q' \
+  "$herdr_bin" "$plugin_root" "$bin"
 if ! "$herdr_bin" pane run "$np" "$run_cmd" >/dev/null 2>&1; then
   cleanup_new
   exit 1

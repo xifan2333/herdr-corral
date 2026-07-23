@@ -12,7 +12,7 @@
 //! - [`herdr`] — host CLI / future RPC
 //! - [`ui`] — palette, icons, layout, activity strip
 //! - [`feature`] — Explorer / SCM / GitHub + [`feature::FeatureView`]
-//! - [`github_detail`] — full-width `corral-github` resource client
+//! - [`github`] — `gh` adapter, models, and full-width detail client
 //! - [`app`] — sidebar event loop / key routing
 
 pub mod app;
@@ -21,7 +21,6 @@ pub mod diffview;
 pub mod feature;
 pub mod git;
 pub mod github;
-pub mod github_detail;
 pub mod herdr;
 pub mod host;
 pub mod ui;
