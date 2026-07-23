@@ -21,3 +21,4 @@ target/
 .cache/
 tmp/
 *.tmp
+.pi-subagents/artifacts/
