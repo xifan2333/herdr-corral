@@ -1,13 +1,13 @@
 //! User config: one shell file (`config.sh`), River-style.
 //!
 //! ```sh
-//! # always: ${XDG_CONFIG_HOME:-~/.config}/corral/config.sh
-//! # Herdr vs standalone is detected inside the shell via $HERDR_ENV / $HERDR_BIN_PATH
+//! # Herdr plugin: $HERDR_PLUGIN_CONFIG_DIR/config.sh
+//! #   (~/.config/herdr/plugins/config/corral/config.sh)
+//! # standalone fallback: ~/.config/corral/config.sh
 //! corral bind enter open
 //! corral bind j down
 //!
 //! open() { ${EDITOR:-vi} "$CORRAL_FILE"; }
-//! # optional: source "${CORRAL_CONFIG_DIR}/git.sh"
 //! ```
 //!
 //! Like River's `riverctl map …`: the config is a script that calls
@@ -424,10 +424,7 @@ pub struct ShellResult {
     pub suspend: bool,
 }
 
-/// Single user config directory for both Herdr-plugin and standalone launches.
-///
-/// Host differences (Herdr pane RPC vs WezTerm/standalone editor) are not
-/// separate config files — `config.sh` branches on `$HERDR_ENV` / `$HERDR_BIN_PATH`.
+/// XDG user config: `~/.config/corral/config.sh`.
 fn config_dir() -> PathBuf {
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
         if !xdg.is_empty() {
@@ -868,12 +865,15 @@ fn shipped_default() -> Option<PathBuf> {
     }
     if let Ok(exe) = std::env::current_exe() {
         // e.g. target/release/corral -> repo/config.default.sh (dev),
-        // or <prefix>/bin/corral -> <prefix>/share/corral/config.default.sh.
+        // or /usr/bin/corral -> /usr/share/herdr-corral/config.default.sh.
         let candidates = [
             exe.parent().map(|d| d.join("config.default.sh")),
             exe.parent()
                 .and_then(|d| d.parent())
                 .map(|d| d.join("config.default.sh")),
+            exe.parent()
+                .and_then(|d| d.parent())
+                .map(|d| d.join("share/herdr-corral/config.default.sh")),
             exe.parent()
                 .and_then(|d| d.parent())
                 .and_then(|d| d.parent())

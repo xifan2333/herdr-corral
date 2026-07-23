@@ -18,39 +18,37 @@ VS Code 风格的**左侧边栏**（Rust）。**开发中**。
 - 文件、SCM diff 和 GitHub 长内容复用一个 owner-scoped nvim pane，通过 RPC 切换 buffer
 - 也可 standalone：`./target/release/corral`
 
+## 安装
+
+```bash
+yay -S herdr-corral-bin                        # 二进制
+herdr plugin install xifan2333/herdr-corral    # 插件注册（clone + manifest）
+herdr plugin action invoke corral.open
+```
+
+| | 来源 |
+|---|---|
+| `/usr/bin/corral{,-diff,-github}` | pacman |
+| 插件 tree（清单/脚本/配置种子） | `herdr plugin install` 的 git clone |
+| 用户配置 | `~/.config/corral/config.sh` |
+
 ## 开发
 
 ```bash
 cargo build --release
+export PATH="$PWD/target/release:$PATH"
+herdr plugin link .
+herdr plugin action invoke corral.open
+```
+## 开发
 
-# 独立
-./target/release/corral
-
-# 插件（左 dock）
+```bash
+cargo build --release
+export PATH="$PWD/target/release:$PATH"
 herdr plugin link .
 herdr plugin action invoke corral.open
 ```
 
-## 发布 / Arch
-
-打 `v*` tag 会跑 `.github/workflows/release.yml`，上传：
-
-- `herdr-corral-<ver>-x86_64.tar.xz`
-- `herdr-corral-<ver>-aarch64.tar.xz`
-
-手动安装 tarball：
-
-```bash
-tar -xJf herdr-corral-<ver>-x86_64.tar.xz
-cd herdr-corral-<ver>-x86_64
-./install.sh   # PATH 含 ~/.local/bin → ~/.local，否则 /usr
-```
-
-AUR 包在 [aur-auto](https://github.com/xifan2333/aur-auto) 的 `herdr-corral-bin`：
-
-```bash
-yay -S herdr-corral-bin
-```
 
 所有快捷键均由可编辑的 `config.sh` 通过 `corral bind <key> <action>`
 注入，程序内不保留默认键位分支。配置使用 `CORRAL_CONFIG_VERSION`

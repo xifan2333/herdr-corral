@@ -3,22 +3,18 @@ name = "Corral"
 version = "0.1.0"
 min_herdr_version = "0.7.0"
 description = "VS Code-style left sidebar: Explorer / SCM / GitHub for Herdr"
-platforms = ["linux", "macos"]
+platforms = ["linux"]
 
-# GitHub `plugin install` builds the binary. Local `plugin link` does not —
-# run `cargo build --release` yourself while developing.
-[[build]]
-command = ["cargo", "build", "--release"]
+# Binaries: /usr/bin (AUR) or $PATH.
+# Plugin tree (manifest + scripts): herdr plugin install xifan2333/herdr-corral.
+# User config: ~/.config/corral/config.sh
 
-# Left-docked sidebar pane. Feature switching is in-process; file, diff, and
-# GitHub previews reuse one owner-scoped nvim pane managed by config.sh.
 [[panes]]
 id = "sidebar"
 title = "Sidebar"
 placement = "split"
-command = ["./target/release/corral"]
+command = ["corral"]
 
-# Dock / open the sidebar on the left of the focused tab.
 [[actions]]
 id = "open"
 title = "Open Corral sidebar"

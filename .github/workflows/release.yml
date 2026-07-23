@@ -67,7 +67,7 @@ jobs:
           target="${{ matrix.target }}"
           name="herdr-corral-${ver}-${arch}"
           dest="dist/${name}"
-          mkdir -p "${dest}/bin" "${dest}/share/herdr-corral/scripts"
+          mkdir -p "${dest}/bin" "${dest}/scripts" "${dest}/share/herdr-corral/scripts"
 
           install -Dm755 "target/${target}/release/corral" "${dest}/bin/corral"
           install -Dm755 "target/${target}/release/corral-diff" "${dest}/bin/corral-diff"
@@ -76,7 +76,6 @@ jobs:
           install -Dm644 herdr-plugin.toml "${dest}/share/herdr-corral/herdr-plugin.toml"
           install -Dm755 scripts/open-corral.sh "${dest}/share/herdr-corral/scripts/open-corral.sh"
           install -Dm644 README.md "${dest}/share/herdr-corral/README.md"
-          install -Dm755 scripts/install-release.sh "${dest}/install.sh"
 
           tar -C dist -cJf "dist/${name}.tar.xz" "${name}"
           (cd dist && sha256sum "${name}.tar.xz" > "${name}.tar.xz.sha256")
@@ -134,9 +133,9 @@ jobs:
             ```bash
             tar -xJf herdr-corral-${{ steps.version.outputs.version }}-x86_64.tar.xz
             cd herdr-corral-${{ steps.version.outputs.version }}-x86_64
-            ./install.sh
+            # package layout: bin/ + share/herdr-corral/
+            # install via AUR herdr-corral-bin, or copy those paths to /usr
             ```
-            `install.sh` installs into `~/.local` when `~/.local/bin` is on `PATH`, otherwise `/usr` (needs root).
 
             ### Arch Linux (AUR)
             ```bash
