@@ -259,6 +259,8 @@ pub(crate) fn render_markdown(
             }
             MdEvent::Text(text) => {
                 if in_code {
+                    // Fenced code blocks keep a full-line surface so multi-line
+                    // snippets read as a block; inline code does not (see Code).
                     for line in text.lines() {
                         out.push(Line::styled(
                             format!("  {line}"),
@@ -272,9 +274,13 @@ pub(crate) fn render_markdown(
                     ));
                 }
             }
+            // Inline `code` is color-only. A per-token bg chip looks fine for a
+            // few spans, but checklist-heavy issue bodies (many `path`/`ident`
+            // tokens) turn into a speckled field of gray blocks. Keep fenced
+            // code blocks' surface0 fill above; do not paint inline chips.
             MdEvent::Code(code) => segs.push((
                 code.to_string(),
-                Style::default().fg(palette.yellow).bg(palette.surface0),
+                Style::default().fg(palette.yellow),
             )),
             MdEvent::SoftBreak => {
                 // Keep an explicit space so flush_block re-joins words.

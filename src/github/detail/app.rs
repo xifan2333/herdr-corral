@@ -988,11 +988,10 @@ impl DetailApp {
         if area.height == 0 {
             return 0;
         }
-        // Reset the whole area's background every frame. Without this, inline
-        // code / code-block cells (bg = surface0) leak their background into
-        // later frames: blank lines and short rows never overwrite those cells,
-        // so scrolling smears stray gray blocks across the page. Reset (not a
-        // themed fill) keeps the body visually transparent as before.
+        // Reset the whole area's background every frame. Fenced code-block cells
+        // still set bg = surface0; blank/short rows never overwrite those cells,
+        // so without a full-area reset scrolling can smear leftover blocks.
+        // Color::Reset (not a themed fill) keeps the body transparent as before.
         frame.render_widget(
             Block::default().style(Style::default().bg(Color::Reset)),
             area,
