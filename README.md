@@ -18,19 +18,34 @@ VS Code 风格的**左侧边栏**（Rust）。**开发中**。
 - 文件、SCM diff 和 GitHub 长内容复用一个 owner-scoped nvim pane，通过 RPC 切换 buffer
 - 也可 standalone：`./target/release/corral`
 
-## 安装
+## 使用
+
+系统层和 Herdr 插件**独立**，互不依赖。
+
+### 纯系统（不用 Herdr）
 
 ```bash
-yay -S herdr-corral-bin                        # 二进制
-herdr plugin install xifan2333/herdr-corral    # 插件注册（clone + manifest）
-herdr plugin action invoke corral.open
+yay -S herdr-corral-bin
+corral             # 直接跑 Sidebar，无 Herdr 也可用
+corral-diff        # 独立 diff 过滤器
+corral-github      # GitHub detail 客户端
 ```
 
-| | 来源 |
+### Herdr 插件（左 dock）
+
+```bash
+yay -S herdr-corral-bin                              # 只装二进制
+herdr plugin install xifan2333/herdr-corral          # 插件注册 + 种子配置
+herdr plugin action invoke corral.open               # 打开
+```
+
+首次启动自动 seed `~/.config/corral/config.sh`（可编辑）。
+
+| 层 | 装什么 |
 |---|---|
-| `/usr/bin/corral{,-diff,-github}` | pacman |
-| 插件 tree（清单/脚本/配置种子） | `herdr plugin install` 的 git clone |
-| 用户配置 | `~/.config/corral/config.sh` |
+| 系统 | `/usr/bin/corral{,-diff,-github}` |
+| Herdr 插件 | `herdr-plugin.toml` + 启动脚本（git clone） |
+| 配置 | `~/.config/corral/config.sh` |
 
 ## 开发
 
@@ -40,14 +55,8 @@ export PATH="$PWD/target/release:$PATH"
 herdr plugin link .
 herdr plugin action invoke corral.open
 ```
-## 开发
 
-```bash
-cargo build --release
-export PATH="$PWD/target/release:$PATH"
-herdr plugin link .
-herdr plugin action invoke corral.open
-```
+打 `v*` tag → release workflow 上传 Linux x86_64 / aarch64 包；AUR `herdr-corral-bin` 跟 release。
 
 
 所有快捷键均由可编辑的 `config.sh` 通过 `corral bind <key> <action>`

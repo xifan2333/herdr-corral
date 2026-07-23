@@ -5,9 +5,9 @@ min_herdr_version = "0.7.0"
 description = "VS Code-style left sidebar: Explorer / SCM / GitHub for Herdr"
 platforms = ["linux"]
 
-# Binaries: /usr/bin (AUR) or $PATH.
-# Plugin tree (manifest + scripts): herdr plugin install xifan2333/herdr-corral.
-# User config: ~/.config/corral/config.sh
+# seed ~/.config/corral/config.sh from config.default.sh on install/upgrade
+[[startup]]
+command = ["bash", "scripts/seed-config.sh"]
 
 [[panes]]
 id = "sidebar"
