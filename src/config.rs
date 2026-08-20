@@ -446,11 +446,13 @@ fn is_safe_fn_name(name: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-const GITHUB_CONFIG_VERSION: u32 = 14;
+const GITHUB_CONFIG_VERSION: u32 = 15;
 const GITHUB_FUNCTION_BEGIN: &str = "# CORRAL_MIGRATION_V6_FUNCTION_BEGIN";
 const GITHUB_FUNCTION_END: &str = "# CORRAL_MIGRATION_V6_FUNCTION_END";
 const GITHUB_DETAIL_BEGIN: &str = "# CORRAL_MIGRATION_V8_FUNCTION_BEGIN";
 const GITHUB_DETAIL_END: &str = "# CORRAL_MIGRATION_V8_FUNCTION_END";
+const WEZTERM_PREVIEW_BEGIN: &str = "# CORRAL_MIGRATION_V15_FUNCTION_BEGIN";
+const WEZTERM_PREVIEW_END: &str = "# CORRAL_MIGRATION_V15_FUNCTION_END";
 const GITHUB_DEFAULT_BINDS: [(&str, &str); 38] = [
     ("github:i", internal::GITHUB_ISSUES),
     ("github:p", internal::GITHUB_PULLS),
@@ -549,6 +551,82 @@ fn declares_function(source: &str, name: &str) -> bool {
     })
 }
 
+/// Rewrite stock "Herdr-only `_corral_run` / else eval" preview dispatch to
+/// `_corral_preview`, which also handles WezTerm nvim :terminal. Custom bodies
+/// that already call `_corral_preview` or omit the stock shape are left alone.
+fn rewrite_stock_preview_dispatch(source: &str) -> String {
+    // Multi-line stock shapes emitted by config.default.sh through v14.
+    const PATTERNS: &[&str] = &[
+        "  if [[ -n \"${HERDR_BIN_PATH:-}\" && -n \"${HERDR_ENV:-}\" ]]; then\n    echo CORRAL_SUSPEND=0\n    _corral_run \"$cmd\"\n    return 0\n  fi\n  echo CORRAL_SUSPEND=1\n  eval \"$cmd\"\n",
+        "  if [[ -n \"${HERDR_BIN_PATH:-}\" && -n \"${HERDR_ENV:-}\" ]]; then\n    echo CORRAL_SUSPEND=0\n    _corral_run \"$cmd\"\n  else\n    echo CORRAL_SUSPEND=1\n    eval \"$cmd\"\n  fi\n",
+        "  if [[ -n \"${HERDR_BIN_PATH:-}\" && -n \"${HERDR_ENV:-}\" ]]; then\n    echo CORRAL_SUSPEND=0\n    _corral_run \"git -C $(printf '%q' \"$dir\") commit -v\"\n    return 0\n  fi\n  echo CORRAL_SUSPEND=1\n  git -C \"$dir\" commit -v\n",
+    ];
+    const REPLACEMENTS: &[&str] = &[
+        "  _corral_preview \"$cmd\"\n",
+        "  _corral_preview \"$cmd\"\n",
+        "  _corral_preview \"git -C $(printf '%q' \"$dir\") commit -v\"\n",
+    ];
+    let mut out = source.to_string();
+    for (pattern, replacement) in PATTERNS.iter().zip(REPLACEMENTS) {
+        out = out.replace(pattern, replacement);
+    }
+    out
+}
+
+/// Replace stock `open()` with the WezTerm-aware version from the shipped
+/// default when the user still has the pre-v15 body (no ensure_nvim helper).
+fn rewrite_stock_open(source: &str, default: &str) -> String {
+    if source.contains("_corral_wezterm_ensure_nvim") {
+        return source.to_string();
+    }
+    let Some(new_open) = extract_function(default, "open") else {
+        return source.to_string();
+    };
+    let Some(old_open) = extract_function(source, "open") else {
+        // No open() at all — append stock so WezTerm users get a path.
+        let mut out = source.trim_end().to_string();
+        out.push('\n');
+        out.push_str(new_open);
+        out.push('\n');
+        return out;
+    };
+    // Only rewrite when the body still matches the old wezterm send-text shape.
+    if !old_open.contains("wezterm cli send-text") && !old_open.contains("WEZTERM_PANE") {
+        return source.to_string();
+    }
+    source.replacen(old_open, new_open, 1)
+}
+
+/// Best-effort extract of `name() { ... }` including nested braces.
+fn extract_function<'a>(source: &'a str, name: &str) -> Option<&'a str> {
+    let header = format!("{name}()");
+    let start = source.find(&header)?;
+    let bytes = source.as_bytes();
+    let mut i = start + header.len();
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if i >= bytes.len() || bytes[i] != b'{' {
+        return None;
+    }
+    let mut depth = 0i32;
+    let mut j = i;
+    while j < bytes.len() {
+        match bytes[j] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&source[start..=j]);
+                }
+            }
+            _ => {}
+        }
+        j += 1;
+    }
+    None
+}
+
 fn set_config_version(source: &str, version: u32) -> String {
     let mut replaced = false;
     let mut output = String::new();
@@ -602,21 +680,49 @@ fn migrate_config(path: &Path, source: &str, default: &str) -> String {
     // context where the `corral bind` helper is temporarily unavailable.
     existing.extend(textual_binds(&source));
     let mut migrated = source.trim_end().to_string();
-    migrated.push_str("\n\n# Corral automatic migration v14: GitHub image text links + imv.\n");
+    migrated.push_str(
+        "\n\n# Corral automatic migration v15: WezTerm nvim pane reuse for diff/issue.\n",
+    );
     for (key, action) in GITHUB_DEFAULT_BINDS {
         if !existing.contains_key(key) {
             migrated.push_str(&format!("corral bind {key} {action}\n"));
         }
     }
-    if !declares_function(&source, "github_preview") {
-        if let Some(block) = marked_block(default, GITHUB_FUNCTION_BEGIN, GITHUB_FUNCTION_END) {
+    // WezTerm preview helpers (_corral_preview / nvim :terminal). Always refresh
+    // the marked block so hosted less/corral-github stop eval'ing without a TTY.
+    if let Some(block) = marked_block(default, WEZTERM_PREVIEW_BEGIN, WEZTERM_PREVIEW_END) {
+        if let (Some(start), Some(end)) = (
+            migrated.find(WEZTERM_PREVIEW_BEGIN),
+            migrated.find(WEZTERM_PREVIEW_END),
+        ) {
+            if start < end {
+                let end = end + WEZTERM_PREVIEW_END.len();
+                migrated.replace_range(start..end, block.trim_end());
+            }
+        } else {
+            migrated.push('\n');
+            migrated.push_str(block);
+            migrated.push('\n');
+        }
+    }
+    // github_preview now dispatches through _corral_preview (WezTerm-aware).
+    if let Some(block) = marked_block(default, GITHUB_FUNCTION_BEGIN, GITHUB_FUNCTION_END) {
+        if let (Some(start), Some(end)) = (
+            migrated.find(GITHUB_FUNCTION_BEGIN),
+            migrated.find(GITHUB_FUNCTION_END),
+        ) {
+            if start < end {
+                let end = end + GITHUB_FUNCTION_END.len();
+                migrated.replace_range(start..end, block.trim_end());
+            }
+        } else if !declares_function(&source, "github_preview") {
             migrated.push('\n');
             migrated.push_str(block);
             migrated.push('\n');
         }
     }
     // Always refresh the marked github_detail block so image viewer env
-    // injection (CORRAL_GITHUB_IMAGE_VIEWER) lands without clobbering user binds.
+    // injection (CORRAL_GITHUB_IMAGE_VIEWER) and WezTerm dispatch land.
     if let Some(block) = marked_block(default, GITHUB_DETAIL_BEGIN, GITHUB_DETAIL_END) {
         if let (Some(start), Some(end)) = (
             migrated.find(GITHUB_DETAIL_BEGIN),
@@ -632,6 +738,10 @@ fn migrate_config(path: &Path, source: &str, default: &str) -> String {
             migrated.push('\n');
         }
     }
+    // Stock SCM preview call sites: HERDR-only → _corral_preview (keeps custom
+    // bodies that already call _corral_preview or diverge entirely).
+    migrated = rewrite_stock_preview_dispatch(&migrated);
+    migrated = rewrite_stock_open(&migrated, default);
     migrated = set_config_version(&migrated, GITHUB_CONFIG_VERSION);
 
     let backup = path.with_extension(format!("sh.v{}.bak", config_version(&source)));
@@ -989,7 +1099,7 @@ mod tests {
     }
 
     fn migration_default() -> &'static str {
-        "CORRAL_CONFIG_VERSION=14\n# CORRAL_MIGRATION_V6_FUNCTION_BEGIN\ngithub_preview() { printf default; }\n# CORRAL_MIGRATION_V6_FUNCTION_END\n# CORRAL_MIGRATION_V8_FUNCTION_BEGIN\nCORRAL_GITHUB_IMAGE_VIEWER=\"${CORRAL_GITHUB_IMAGE_VIEWER:-imv}\"\ngithub_detail() { printf detail; }\n# CORRAL_MIGRATION_V8_FUNCTION_END\n"
+        "CORRAL_CONFIG_VERSION=15\n# CORRAL_MIGRATION_V15_FUNCTION_BEGIN\n_corral_preview() { printf wezterm-preview; }\n# CORRAL_MIGRATION_V15_FUNCTION_END\n# CORRAL_MIGRATION_V6_FUNCTION_BEGIN\ngithub_preview() { printf default; }\n# CORRAL_MIGRATION_V6_FUNCTION_END\n# CORRAL_MIGRATION_V8_FUNCTION_BEGIN\nCORRAL_GITHUB_IMAGE_VIEWER=\"${CORRAL_GITHUB_IMAGE_VIEWER:-imv}\"\ngithub_detail() { printf detail; }\n# CORRAL_MIGRATION_V8_FUNCTION_END\nopen() { :; }\n"
     }
 
     #[test]
@@ -1003,7 +1113,8 @@ mod tests {
         assert!(migrated.contains("github_preview() { printf custom; }"));
         assert!(!migrated.contains("github_preview() { printf default; }"));
         assert!(migrated.contains("github_detail() { printf detail; }"));
-        assert_eq!(config_version(&migrated), 14);
+        assert_eq!(config_version(&migrated), 15);
+        assert!(migrated.contains("_corral_preview() { printf wezterm-preview; }"));
         let _ = std::fs::remove_file(path.with_extension("sh.v5.bak"));
         let _ = std::fs::remove_file(path);
     }
@@ -1064,8 +1175,35 @@ mod tests {
         assert!(migrated.contains("github_detail() { printf detail; }"));
         assert!(migrated.contains("CORRAL_GITHUB_IMAGE_VIEWER"));
         assert!(!migrated.contains("printf stale"));
-        assert_eq!(config_version(&migrated), 14);
+        assert_eq!(config_version(&migrated), 15);
+        assert!(migrated.contains("_corral_preview() { printf wezterm-preview; }"));
         let _ = std::fs::remove_file(path.with_extension("sh.v12.bak"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn migration_rewrites_stock_herdr_only_preview_dispatch() {
+        let path = tempfile_path("corral-config-migrate").unwrap();
+        let source = concat!(
+            "CORRAL_CONFIG_VERSION=14\n",
+            "_corral_show_diff() {\n",
+            "  cmd=demo\n",
+            "  if [[ -n \"${HERDR_BIN_PATH:-}\" && -n \"${HERDR_ENV:-}\" ]]; then\n",
+            "    echo CORRAL_SUSPEND=0\n",
+            "    _corral_run \"$cmd\"\n",
+            "    return 0\n",
+            "  fi\n",
+            "  echo CORRAL_SUSPEND=1\n",
+            "  eval \"$cmd\"\n",
+            "}\n",
+        );
+        std::fs::write(&path, source).unwrap();
+        let migrated = migrate_config(&path, source, migration_default());
+        assert!(migrated.contains("_corral_preview \"$cmd\""));
+        assert!(!migrated.contains("eval \"$cmd\""));
+        assert!(migrated.contains("_corral_preview() { printf wezterm-preview; }"));
+        assert_eq!(config_version(&migrated), 15);
+        let _ = std::fs::remove_file(path.with_extension("sh.v14.bak"));
         let _ = std::fs::remove_file(path);
     }
 

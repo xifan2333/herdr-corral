@@ -119,3 +119,23 @@ exit 0
 
     fs::remove_dir_all(temp).unwrap();
 }
+
+#[test]
+fn wezterm_previews_reuse_nvim_terminal_not_eval() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let config = fs::read_to_string(root.join("config.default.sh")).unwrap();
+    assert!(config.contains("_corral_run_wezterm"));
+    assert!(config.contains("_corral_wezterm_ensure_nvim"));
+    assert!(config.contains("_corral_preview"));
+    assert!(config.contains(":terminal bash"));
+    // Stock call sites must go through the host dispatcher.
+    assert!(config.contains("_corral_preview \"$cmd\""));
+    // Hosted WezTerm must not eval less/corral-github on the action TTY.
+    let preview_fn = config
+        .split("_corral_preview()")
+        .nth(1)
+        .and_then(|s| s.split("# CORRAL_MIGRATION_V15_FUNCTION_END").next())
+        .unwrap_or("");
+    assert!(preview_fn.contains("WEZTERM_PANE"));
+    assert!(preview_fn.contains("_corral_run_wezterm"));
+}

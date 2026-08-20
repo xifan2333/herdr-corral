@@ -6,7 +6,7 @@
 # are detected in shell via $HERDR_ENV / $HERDR_BIN_PATH (see open(), github_detail).
 # Future migrations use this in-place version and preserve customized
 # bindings/functions.
-CORRAL_CONFIG_VERSION=14
+CORRAL_CONFIG_VERSION=15
 #
 # River-style: call `corral bind <key> <action>` (like `riverctl map …`).
 #   global actions: quit feature-explorer feature-scm feature-github
@@ -240,6 +240,126 @@ _corral_ensure_nvim() {
   return 1
 }
 
+# CORRAL_MIGRATION_V15_FUNCTION_BEGIN
+# WezTerm side-pane helpers. Prefer one reused nvim pane for open + previews
+# (:edit / :terminal). If the target pane is not nvim, start one.
+_corral_wezterm_pane_title() {
+  local pid=$1 panes
+  panes="$(wezterm cli list --format json 2>/dev/null || true)"
+  jq -r --argjson id "$pid" '.[] | select(.pane_id == $id) | .title // empty' \
+    <<<"$panes" 2>/dev/null || true
+}
+
+# Resolve an existing target pane: remembered → same-tab rightmost.
+# Prints pane id, or empty if none (caller starts nvim). Does not split.
+_corral_wezterm_pane() {
+  [[ -n "${WEZTERM_PANE:-}" ]] && command -v wezterm >/dev/null 2>&1 || return 1
+  local me="$WEZTERM_PANE" state="$CORRAL_CONFIG_DIR/wezterm-editor.pane"
+  local pid panes saved
+  panes="$(wezterm cli list --format json 2>/dev/null || true)"
+  saved="$(cat "$state" 2>/dev/null || true)"
+  pid="$(jq -r --argjson me "$me" --arg saved "$saved" '
+    ($saved | tonumber? // 0) as $s
+    | if $s > 0 and any(.[]; .pane_id == $s) and $s != $me then $s
+      else
+        (map(select(.pane_id == $me))[0].tab_id) as $tab
+        | [ .[] | select(.tab_id == $tab and .pane_id != $me) ] as $others
+        # Prefer an existing nvim/vim pane so we do not steal agent panes (pi).
+        | (($others | map(select(.title != null and (.title | test("nvim|vim"; "i")))) | sort_by(-.left_col) | .[0].pane_id)
+            // ($others | sort_by(-.left_col) | .[0].pane_id)
+            // empty)
+      end
+    ' <<<"$panes" 2>/dev/null || true)"
+  if [[ -n "$pid" ]]; then
+    printf '%s' "$pid" >"$state"
+    printf '%s' "$pid"
+  fi
+}
+
+# Ensure the wezterm target is nvim so :edit / :terminal work. Reuses an
+# existing nvim/vim pane; otherwise splits a fresh `nvim` pane (never steals
+# agent panes like pi). Prints the pane id to use.
+_corral_wezterm_ensure_nvim() {
+  local pid=${1:-} me="$WEZTERM_PANE" state="$CORRAL_CONFIG_DIR/wezterm-editor.pane"
+  local title bin new_pid _i
+  bin=$(command -v nvim 2>/dev/null || true)
+  [[ -n "$bin" ]] || {
+    printf 'corral: wezterm pane reuse requires nvim\n' >&2
+    return 1
+  }
+  if [[ -n "$pid" ]]; then
+    title="$(_corral_wezterm_pane_title "$pid")"
+    if [[ "$title" == *nvim* || "$title" == *vim* ]]; then
+      printf '%s' "$pid"
+      return 0
+    fi
+  fi
+  # Missing or non-nvim target → dedicated nvim split (PROG form, reliable TTY).
+  new_pid="$(wezterm cli split-pane --pane-id "$me" --right --percent 75 -- "$bin" 2>/dev/null | tr -d '[:space:]')" || return 1
+  [[ -n "$new_pid" ]] || return 1
+  printf '%s' "$new_pid" >"$state"
+  for _i in $(seq 1 40); do
+    title="$(_corral_wezterm_pane_title "$new_pid")"
+    if [[ "$title" == *nvim* || "$title" == *vim* ]]; then
+      printf '%s' "$new_pid"
+      return 0
+    fi
+    sleep 0.05
+  done
+  printf '%s' "$new_pid"
+}
+
+# Write cmd to a private script and run it via nvim :terminal in the wezterm
+# side pane. Hosted corral has no TTY, so less/corral-github must not eval here.
+_corral_run_wezterm() {
+  local cmd="$1" pid runtime script qscript
+  pid="$(_corral_wezterm_pane)" || return 1
+  pid="$(_corral_wezterm_ensure_nvim "$pid")" || return 1
+  runtime="$(_corral_runtime_dir)" || return 1
+  script="$(mktemp "$runtime/preview.XXXXXX")" || return 1
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'trap '\''rm -f -- "$0"'\'' EXIT\n'
+    printf 'set -o pipefail\n'
+    printf '%s\n' "$cmd"
+  } >"$script" || { rm -f -- "$script"; return 1; }
+  chmod 700 "$script" || { rm -f -- "$script"; return 1; }
+  qscript=$(printf '%q' "$script")
+  wezterm cli activate-pane --pane-id "$pid" >/dev/null 2>&1 || true
+  # Esc → normal mode, then :terminal. Two send-text calls (proved reliable):
+  # a single "Ctrl-C + shell cmd" path eats the first character under zsh.
+  if ! wezterm cli send-text --pane-id "$pid" --no-paste $'\e' >/dev/null 2>&1; then
+    rm -f -- "$script"
+    return 1
+  fi
+  sleep 0.05
+  # Private script path is shell-quoted. nvim :terminal gets a real PTY so
+  # less / corral-github raw-mode work (unlike eval in the hosted action).
+  if ! wezterm cli send-text --pane-id "$pid" --no-paste \
+      ":terminal bash ${qscript}"$'\r' >/dev/null 2>&1; then
+    rm -f -- "$script"
+    return 1
+  fi
+}
+
+# Dispatch a preview/pager command to the right host surface.
+_corral_preview() {
+  local cmd="$1"
+  if [[ -n "${HERDR_BIN_PATH:-}" && -n "${HERDR_ENV:-}" ]]; then
+    echo CORRAL_SUSPEND=0
+    _corral_run "$cmd"
+    return $?
+  fi
+  if [[ -n "${WEZTERM_PANE:-}" ]] && command -v wezterm >/dev/null 2>&1; then
+    echo CORRAL_SUSPEND=0
+    _corral_run_wezterm "$cmd"
+    return $?
+  fi
+  echo CORRAL_SUSPEND=1
+  eval "$cmd"
+}
+# CORRAL_MIGRATION_V15_FUNCTION_END
+
 open() {
   local file="${1:-${CORRAL_FILE:-}}"
   [[ -n "$file" && -e "$file" ]] || return 1
@@ -259,43 +379,15 @@ open() {
   fi
 
   # --- wezterm ---
-  # Resolve a target pane: remembered → same-tab rightmost → split once.
-  # Always send editor into it; never `split-pane -- $editor file`.
+  # Reuse one nvim side pane: remembered → rightmost → split nvim if needed.
+  # Always :edit into it; never `split-pane -- $editor file`.
   if [[ -n "${WEZTERM_PANE:-}" ]] && command -v wezterm >/dev/null 2>&1; then
     echo CORRAL_SUSPEND=0
-    local me="$WEZTERM_PANE" state="$CORRAL_CONFIG_DIR/wezterm-editor.pane"
-    local pid title panes saved
-
-    panes="$(wezterm cli list --format json 2>/dev/null || true)"
-    saved="$(cat "$state" 2>/dev/null || true)"
-
-    pid="$(jq -r --argjson me "$me" --arg saved "$saved" '
-      ($saved | tonumber? // 0) as $s
-      | if $s > 0 and any(.[]; .pane_id == $s) and $s != $me then $s
-        else
-          (map(select(.pane_id == $me))[0].tab_id) as $tab
-          | [ .[] | select(.tab_id == $tab and .pane_id != $me) ]
-          | sort_by(-.left_col) | .[0].pane_id // empty
-        end
-      ' <<<"$panes" 2>/dev/null || true)"
-
-    if [[ -z "$pid" ]]; then
-      pid="$(wezterm cli split-pane --pane-id "$me" --right --percent 75 2>/dev/null | tr -d '[:space:]')" || return 1
-      [[ -n "$pid" ]] || return 1
-      sleep 0.15
-      panes="$(wezterm cli list --format json 2>/dev/null || true)"
-    fi
-    printf '%s' "$pid" >"$state"
-
-    title="$(jq -r --argjson id "$pid" '.[] | select(.pane_id == $id) | .title // empty' <<<"$panes" 2>/dev/null || true)"
-
+    local pid
+    pid="$(_corral_wezterm_pane)" || return 1
+    pid="$(_corral_wezterm_ensure_nvim "$pid")" || return 1
     wezterm cli activate-pane --pane-id "$pid" >/dev/null 2>&1 || true
-    # nvim/vim already running in the pane → :edit; otherwise launch editor.
-    if [[ "$title" == *nvim* || "$title" == *vim* ]]; then
-      wezterm cli send-text --pane-id "$pid" --no-paste $'\e:edit '"$vfile"$'\r' >/dev/null
-    else
-      wezterm cli send-text --pane-id "$pid" --no-paste $'\003'"$editor $qfile"$'\r' >/dev/null
-    fi
+    wezterm cli send-text --pane-id "$pid" --no-paste $'\e:edit '"$vfile"$'\r' >/dev/null
     return 0
   fi
 
@@ -423,13 +515,7 @@ _corral_show_diff() {
   path="${CORRAL_GIT_PATH:-$file}"
   orig="${CORRAL_GIT_ORIG:-}"
   cmd=$(_corral_diff_cmd "$kind" "$dir" "$path" "$orig")
-  if [[ -n "${HERDR_BIN_PATH:-}" && -n "${HERDR_ENV:-}" ]]; then
-    echo CORRAL_SUSPEND=0
-    _corral_run "$cmd"
-    return 0
-  fi
-  echo CORRAL_SUSPEND=1
-  eval "$cmd"
+  _corral_preview "$cmd"
 }
 
 # Feature actions emitted by SCM; keep kind explicit across the shell boundary.
@@ -454,13 +540,7 @@ show_ref() {
   else
     cmd="$source | less -R"
   fi
-  if [[ -n "${HERDR_BIN_PATH:-}" && -n "${HERDR_ENV:-}" ]]; then
-    echo CORRAL_SUSPEND=0
-    _corral_run "$cmd"
-  else
-    echo CORRAL_SUSPEND=1
-    eval "$cmd"
-  fi
+  _corral_preview "$cmd"
 }
 
 # Worktree activation opens its root in the same owner-scoped nvim instance.
@@ -519,13 +599,7 @@ github_preview() {
       ;;
     *) return 1 ;;
   esac
-  if [[ -n "${HERDR_BIN_PATH:-}" && -n "${HERDR_ENV:-}" ]]; then
-    echo CORRAL_SUSPEND=0
-    _corral_run "$cmd"
-  else
-    echo CORRAL_SUSPEND=1
-    eval "$cmd"
-  fi
+  _corral_preview "$cmd"
 }
 # CORRAL_MIGRATION_V6_FUNCTION_END
 
@@ -567,13 +641,7 @@ github_detail() {
   qviewer=$(printf '%q' "${CORRAL_GITHUB_IMAGE_VIEWER:-imv}")
   printf -v cmd 'exec env CORRAL_GITHUB_IMAGE_VIEWER=%s %s %s --repo %s %s --view %s' \
     "$qviewer" "$qbin" "$resource" "$qrepo" "$id" "$view"
-  if [[ -n "${HERDR_BIN_PATH:-}" && -n "${HERDR_ENV:-}" ]]; then
-    echo CORRAL_SUSPEND=0
-    _corral_run "$cmd"
-  else
-    echo CORRAL_SUSPEND=1
-    eval "$cmd"
-  fi
+  _corral_preview "$cmd"
 }
 # CORRAL_MIGRATION_V8_FUNCTION_END
 
@@ -625,11 +693,5 @@ commit_message() {
 # Optional interactive commit action for custom user bindings.
 commit() {
   local dir="${1:-${CORRAL_FILE:-.}}"
-  if [[ -n "${HERDR_BIN_PATH:-}" && -n "${HERDR_ENV:-}" ]]; then
-    echo CORRAL_SUSPEND=0
-    _corral_run "git -C $(printf '%q' "$dir") commit -v"
-    return 0
-  fi
-  echo CORRAL_SUSPEND=1
-  git -C "$dir" commit -v
+  _corral_preview "git -C $(printf '%q' "$dir") commit -v"
 }
