@@ -171,7 +171,9 @@ impl ExplorerView {
             body_top: Cell::new(0),
             body_height: Cell::new(0),
             nerd_font,
-            show_hidden: false,
+            show_hidden: std::env::var("CORRAL_SHOW_HIDDEN")
+                .map(|v| v != "0" && v != "false")
+                .unwrap_or(true),
             error: None,
             notice: watch_notice,
             notice_at,

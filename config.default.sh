@@ -427,6 +427,10 @@ _corral_run() {
 # gutters, red/green row tints, and word-level change highlighting.
 CORRAL_DIFF_TOOL="${CORRAL_DIFF_TOOL:-corral}"
 
+# Diff context lines for SCM previews:
+#   full (default: whole file with highlighted diffs) | 3 (standard hunk) | <number>
+CORRAL_DIFF_CONTEXT="${CORRAL_DIFF_CONTEXT:-full}"
+
 # Optional delta fallback settings when CORRAL_DIFF_TOOL=delta.
 CORRAL_DELTA_THEME="${CORRAL_DELTA_THEME:-Catppuccin Mocha}"
 _corral_delta_opts() {
@@ -439,14 +443,22 @@ _corral_delta_opts() {
 # git's exit 1 then means "different", not failure. Rename/copy previews pass
 # both pathspecs so Git retains their structural semantics.
 _corral_diff_source() {
-  local kind=$1 qdir=$2 qfile=$3 qorig=${4:-} color=${5:-never} color_arg="" paths
+  local kind=$1 qdir=$2 qfile=$3 qorig=${4:-} color=${5:-never} color_arg="" ctx_arg="" paths
   [[ "$color" == always ]] && color_arg='-c color.ui=always '
+
+  local ctx="${CORRAL_DIFF_CONTEXT:-full}"
+  if [[ "$ctx" == "full" ]]; then
+    ctx_arg="-U99999 "
+  elif [[ "$ctx" =~ ^[0-9]+$ ]]; then
+    ctx_arg="-U$ctx "
+  fi
+
   paths=$qfile
   [[ -n "$qorig" ]] && paths="$paths $qorig"
   case "$kind" in
-    staged) printf 'git -C %s --literal-pathspecs %sdiff --cached -- %s' "$qdir" "$color_arg" "$paths" ;;
-    untracked) printf '{ git -C %s --literal-pathspecs %sdiff --no-index -- /dev/null %s || test $? -eq 1; }' "$qdir" "$color_arg" "$qfile" ;;
-    *) printf 'git -C %s --literal-pathspecs %sdiff -- %s' "$qdir" "$color_arg" "$paths" ;;
+    staged) printf 'git -C %s --literal-pathspecs %sdiff %s--cached -- %s' "$qdir" "$color_arg" "$ctx_arg" "$paths" ;;
+    untracked) printf '{ git -C %s --literal-pathspecs %sdiff %s--no-index -- /dev/null %s || test $? -eq 1; }' "$qdir" "$color_arg" "$ctx_arg" "$qfile" ;;
+    *) printf 'git -C %s --literal-pathspecs %sdiff %s-- %s' "$qdir" "$color_arg" "$ctx_arg" "$paths" ;;
   esac
 }
 
@@ -529,7 +541,10 @@ show_ref() {
   local qdir qref qpath source renderer cmd
   [[ -n "$ref" ]] || return 1
   qdir=$(printf '%q' "$dir"); qref=$(printf '%q' "$ref")
-  source="git -C $qdir --literal-pathspecs show --format=fuller --stat --patch --end-of-options $qref"
+  local ctx="${CORRAL_DIFF_CONTEXT:-full}" ctx_arg=""
+  [[ "$ctx" == "full" ]] && ctx_arg="-U99999 "
+  [[ "$ctx" =~ ^[0-9]+$ ]] && ctx_arg="-U$ctx "
+  source="git -C $qdir --literal-pathspecs show --format=fuller --stat --patch ${ctx_arg}--end-of-options $qref"
   if [[ -n "$path" ]]; then
     qpath=$(printf '%q' "$path")
     source="$source -- $qpath"
