@@ -6,7 +6,7 @@
 # are detected in shell via $HERDR_ENV / $HERDR_BIN_PATH (see open(), github_detail).
 # Future migrations use this in-place version and preserve customized
 # bindings/functions.
-CORRAL_CONFIG_VERSION=15
+CORRAL_CONFIG_VERSION=16
 #
 # River-style: call `corral bind <key> <action>` (like `riverctl map …`).
 #   global actions: quit feature-explorer feature-scm feature-github
@@ -338,6 +338,8 @@ _corral_run_wezterm() {
     rm -f -- "$script"
     return 1
   fi
+  sleep 0.05
+  wezterm cli send-text --pane-id "$pid" --no-paste 'i' >/dev/null 2>&1 || true
 }
 
 # Dispatch a preview/pager command to the right host surface.
@@ -411,7 +413,7 @@ _corral_run() {
   } >"$script" || { rm -f -- "$script"; return 1; }
   chmod 700 "$script" || { rm -f -- "$script"; return 1; }
   vim_path="$(printf '%s' "$script" | jq -Rs .)" || { rm -f -- "$script"; return 1; }
-  expr="execute('if &buftype ==# ''terminal'' | bwipeout! | endif | enew | setlocal nonumber norelativenumber signcolumn=no foldcolumn=0 wrap | terminal ' . fnameescape($vim_path)) . execute('setlocal wrap') . execute('call winrestview({''leftcol'': 0})')"
+  expr="execute('if &buftype ==# ''terminal'' | bwipeout! | endif | enew | setlocal nonumber norelativenumber signcolumn=no foldcolumn=0 wrap | terminal ' . fnameescape($vim_path)) . execute('setlocal wrap') . execute('call winrestview({''leftcol'': 0})') . execute('startinsert')"
   if ! "$nvim" --server "$socket" --remote-expr "$expr" >/dev/null 2>&1; then
     rm -f -- "$script"
     return 1
