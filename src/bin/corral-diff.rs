@@ -36,6 +36,23 @@ fn terminal_width() -> u16 {
             return cols;
         }
     }
+    #[cfg(unix)]
+    if let Ok(file) = std::fs::File::open("/dev/tty") {
+        use std::os::fd::AsRawFd;
+        let mut winsize = libc::winsize {
+            ws_row: 0,
+            ws_col: 0,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        unsafe {
+            if libc::ioctl(file.as_raw_fd(), libc::TIOCGWINSZ, &mut winsize) == 0
+                && winsize.ws_col > 0
+            {
+                return winsize.ws_col;
+            }
+        }
+    }
     std::env::var("COLUMNS")
         .ok()
         .and_then(|s| s.parse().ok())

@@ -269,11 +269,12 @@ dependencies = [
 
 [[package]]
 name = "corral"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "crossterm 0.29.0",
  "devicons",
  "has-nerd-font",
+ "libc",
  "notify",
  "pulldown-cmark",
  "ratatui",

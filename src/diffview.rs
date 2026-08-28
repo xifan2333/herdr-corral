@@ -236,14 +236,13 @@ fn render_ctx(
     n: usize,
     text: &str,
     palette: &Palette,
-    w: usize,
+    _w: usize,
     gw: usize,
 ) {
     gutter(out, Some(o), Some(n), gw, palette);
     out.push_str("  ");
     out.push_str(&fg(palette.text));
-    let body = clip(text, w.saturating_sub(2 * gw + 5));
-    out.push_str(&body);
+    out.push_str(text);
     out.push_str(RESET);
     out.push('\n');
 }
@@ -360,9 +359,6 @@ fn code_line(
 
     let mut cols = 1usize; // sign already took one column
     for (idx, ch) in text.chars().enumerate() {
-        if cols >= cell_w {
-            break;
-        }
         let in_word = word.is_some_and(|(a, b)| idx >= a && idx < b && a < b);
         if in_word {
             out.push_str(&bg_rgb(word_bg));
@@ -373,7 +369,7 @@ fn code_line(
         }
         cols += 1;
     }
-    // Pad the rest of the row with the base tint.
+    // Pad the rest of the row with the base tint if shorter than terminal width.
     if cols < cell_w {
         out.push_str(&" ".repeat(cell_w - cols));
     }
@@ -382,15 +378,6 @@ fn code_line(
 }
 
 // --- helpers ----------------------------------------------------------------
-
-/// Clip a string to at most `max` display columns (approx: char count).
-fn clip(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        s.chars().take(max.saturating_sub(1)).collect::<String>() + "…"
-    }
-}
 
 /// Approximate display width (char count; good enough for source lines).
 fn disp(s: &str) -> usize {
@@ -484,5 +471,17 @@ mod tests {
         assert!(!events
             .iter()
             .any(|event| { matches!(event, Ev::Del(_, text) if text == "--") }));
+    }
+
+    #[test]
+    fn long_lines_are_never_truncated() {
+        let long_line = "print(f\"screenrecord-overlay-camera: missing dependency: {exc}\", file=sys.stderr)";
+        let diff = format!(
+            "diff --git a/f.py b/f.py\n--- a/f.py\n+++ b/f.py\n@@ -1,2 +1,2 @@\n {long_line}\n+{long_line}\n"
+        );
+        let out = render(&diff, &Palette::named("catppuccin").unwrap(), 40);
+        // Even with width=40, the full long line should be present in output, not truncated with ellipsis.
+        assert!(out.contains(long_line));
+        assert!(!out.contains('…'));
     }
 }
