@@ -70,7 +70,6 @@ jobs:
           mkdir -p "${dest}/bin" "${dest}/scripts" "${dest}/share/herdr-corral/scripts"
 
           install -Dm755 "target/${target}/release/corral" "${dest}/bin/corral"
-          install -Dm755 "target/${target}/release/corral-diff" "${dest}/bin/corral-diff"
           install -Dm755 "target/${target}/release/corral-github" "${dest}/bin/corral-github"
           install -Dm644 config.default.sh "${dest}/share/herdr-corral/config.default.sh"
           install -Dm644 herdr-plugin.toml "${dest}/share/herdr-corral/herdr-plugin.toml"

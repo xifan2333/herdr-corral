@@ -17,7 +17,6 @@
 
 pub mod app;
 pub mod config;
-pub mod diffview;
 pub mod feature;
 pub mod git;
 pub mod github;

@@ -326,9 +326,7 @@ _corral_run_wezterm() {
   chmod 700 "$script" || { rm -f -- "$script"; return 1; }
   qscript=$(printf '%q' "$script")
   wezterm cli activate-pane --pane-id "$pid" >/dev/null 2>&1 || true
-  # Esc → normal mode, then :terminal. Two send-text calls (proved reliable):
-  # a single "Ctrl-C + shell cmd" path eats the first character under zsh.
-  if ! wezterm cli send-text --pane-id "$pid" --no-paste $'\e' >/dev/null 2>&1; then
+  if ! wezterm cli send-text --pane-id "$pid" --no-paste $'\x1c\x0e\e' >/dev/null 2>&1; then
     rm -f -- "$script"
     return 1
   fi
@@ -413,7 +411,7 @@ _corral_run() {
   } >"$script" || { rm -f -- "$script"; return 1; }
   chmod 700 "$script" || { rm -f -- "$script"; return 1; }
   vim_path="$(printf '%s' "$script" | jq -Rs .)" || { rm -f -- "$script"; return 1; }
-  expr="execute('if &buftype ==# ''terminal'' | bwipeout! | endif | enew | setlocal nonumber norelativenumber signcolumn=no foldcolumn=0 wrap | terminal ' . fnameescape($vim_path)) . execute('setlocal wrap') . execute('call winrestview({''leftcol'': 0})') . execute('startinsert')"
+  expr="execute('if &buftype ==# ''terminal'' | bwipeout! | endif | enew | setlocal nonumber norelativenumber signcolumn=no foldcolumn=0 wrap | terminal ' . fnameescape($vim_path)) . execute('setlocal wrap') . execute('call winrestview({''leftcol'': 0})')"
   if ! "$nvim" --server "$socket" --remote-expr "$expr" >/dev/null 2>&1; then
     rm -f -- "$script"
     return 1
@@ -422,10 +420,8 @@ _corral_run() {
 }
 
 # Diff renderer for SCM previews:
-#   corral (default) | difft | fancy | delta | git
-# `corral` is our standalone filter: same Palette as the sidebar, dual line
-# gutters, red/green row tints, and word-level change highlighting.
-CORRAL_DIFF_TOOL="${CORRAL_DIFF_TOOL:-corral}"
+#   delta (default, unified syntax-highlighted diff with n/p navigation) | corral | difft | fancy | git
+CORRAL_DIFF_TOOL="${CORRAL_DIFF_TOOL:-delta}"
 
 # Diff context lines for SCM previews:
 #   full (default: whole file with highlighted diffs) | 3 (standard hunk) | <number>
@@ -434,7 +430,7 @@ CORRAL_DIFF_CONTEXT="${CORRAL_DIFF_CONTEXT:-full}"
 # Optional delta fallback settings when CORRAL_DIFF_TOOL=delta.
 CORRAL_DELTA_THEME="${CORRAL_DELTA_THEME:-Catppuccin Mocha}"
 _corral_delta_opts() {
-  printf -- '--syntax-theme=%q --line-numbers --hunk-header-decoration-style=none --file-decoration-style="#45475a ul" --file-style="#89b4fa bold" --paging=always' \
+  printf -- '--syntax-theme=%q --line-numbers --hunk-header-decoration-style=none --file-decoration-style="#45475a ul" --file-style="#89b4fa bold" --paging=never' \
     "$CORRAL_DELTA_THEME"
 }
 
@@ -473,13 +469,12 @@ _corral_diff_cmd() {
   source=$(_corral_diff_source "$kind" "$qdir" "$qfile" "$qorig")
 
   case "$tool" in
-    corral)
-      bin=$(command -v corral-diff 2>/dev/null || true)
+    delta)
+      bin=$(command -v delta 2>/dev/null || true)
       if [[ -n "$bin" ]]; then
-        printf '%s | %q | less -R' "$source" "$bin"
+        printf '%s | %q %s' "$source" "$bin" "$(_corral_delta_opts)"
         return
       fi
-      # A partial install without corral-diff degrades to plain colored git.
       ;;
     difft)
       bin=$(command -v difft 2>/dev/null || true)
@@ -502,14 +497,7 @@ _corral_diff_cmd() {
         return
       fi
       ;;
-    delta)
-      bin=$(command -v delta 2>/dev/null || true)
-      if [[ -n "$bin" ]]; then
-        printf '%s | %q %s' "$source" "$bin" "$(_corral_delta_opts)"
-        return
-      fi
-      ;;
-    git) ;;
+    git|corral) ;;
     *) printf 'printf %q >&2; false' "corral: unknown CORRAL_DIFF_TOOL=$tool"; return ;;
   esac
 
@@ -538,7 +526,7 @@ diff_untracked() { _corral_show_diff untracked "$@"; }
 # Show a commit/branch reference, optionally restricted to the File History path.
 show_ref() {
   local dir="${CORRAL_GIT_ROOT:-${1:-.}}" ref="${CORRAL_GIT_REF:-}" path="${CORRAL_GIT_PATH:-}"
-  local qdir qref qpath source renderer cmd
+  local qdir qref qpath source cmd
   [[ -n "$ref" ]] || return 1
   qdir=$(printf '%q' "$dir"); qref=$(printf '%q' "$ref")
   local ctx="${CORRAL_DIFF_CONTEXT:-full}" ctx_arg=""
@@ -549,9 +537,8 @@ show_ref() {
     qpath=$(printf '%q' "$path")
     source="$source -- $qpath"
   fi
-  renderer=$(command -v corral-diff 2>/dev/null || true)
-  if [[ -n "$renderer" ]]; then
-    printf -v cmd '%s | %q | less -R' "$source" "$renderer"
+  if [[ "$CORRAL_DIFF_TOOL" == "delta" ]] && command -v delta >/dev/null 2>&1; then
+    printf -v cmd '%s | %q %s' "$source" "$(command -v delta)" "$(_corral_delta_opts)"
   else
     cmd="$source | less -R"
   fi
@@ -588,9 +575,8 @@ github_preview() {
       ;;
     diff)
       [[ "$number" =~ ^[0-9]+$ ]] || return 1
-      renderer=$(command -v corral-diff 2>/dev/null || true)
-      if [[ -n "$renderer" ]]; then
-        printf -v cmd 'GH_PROMPT_DISABLED=1 GH_PAGER=cat %s pr diff %s --repo %s | %q | less -R' "$qgh" "$number" "$qrepo" "$renderer"
+      if [[ "$CORRAL_DIFF_TOOL" == "delta" ]] && command -v delta >/dev/null 2>&1; then
+        printf -v cmd 'GH_PROMPT_DISABLED=1 GH_PAGER=cat %s pr diff %s --repo %s | %q %s' "$qgh" "$number" "$qrepo" "$(command -v delta)" "$(_corral_delta_opts)"
       else
         printf -v cmd 'GH_PROMPT_DISABLED=1 GH_PAGER=cat %s pr diff %s --repo %s | less -R' "$qgh" "$number" "$qrepo"
       fi

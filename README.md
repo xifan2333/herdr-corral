@@ -18,7 +18,6 @@ herdr plugin action invoke corral.open               # 打开左 dock
 
 ```bash
 corral
-corral-diff
 corral-github issue --repo owner/repo 123
 ```
 
@@ -104,7 +103,6 @@ corral-github issue --repo owner/repo 123
 | `feature/{explorer,scm,github}` | sidebar FeatureView |
 | `github/{gh,model,detail}` | `gh` CLI + 数据 + 全宽客户端 |
 | `git` | status 发现、stage / unstage |
-| `diffview` / `corral-diff` | 主题化 diff |
 | `ui` | palette / icons / activity |
 | `herdr` | 宿主 CLI |
 

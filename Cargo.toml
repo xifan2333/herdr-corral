@@ -1,6 +1,6 @@
 [package]
 name = "corral"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 description = "VS Code-style terminal workbench plugin for Herdr"
 license = "MIT"
@@ -14,15 +14,10 @@ name = "corral"
 path = "src/main.rs"
 
 [[bin]]
-name = "corral-diff"
-path = "src/bin/corral-diff.rs"
-
-[[bin]]
 name = "corral-github"
 path = "src/bin/corral-github.rs"
 
 [dependencies]
-libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
