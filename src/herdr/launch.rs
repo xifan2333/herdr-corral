@@ -27,7 +27,8 @@ struct PaneListResult {
 
 #[derive(Deserialize)]
 struct Pane {
-    pane_id: Option<String>,
+    #[serde(rename = "pane_id")]
+    id: Option<String>,
     cwd: Option<String>,
     #[serde(default)]
     focused: bool,
@@ -56,7 +57,8 @@ struct Layout {
 
 #[derive(Deserialize)]
 struct LayoutPane {
-    pane_id: Option<String>,
+    #[serde(rename = "pane_id")]
+    id: Option<String>,
     rect: Option<Rect>,
 }
 
@@ -81,8 +83,7 @@ fn strip_bom(input: &str) -> &str {
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0)
+        .map_or(0, |duration| duration.as_secs())
 }
 
 fn heartbeat_fresh(pane: &Pane, now: u64) -> bool {
@@ -98,6 +99,7 @@ fn heartbeat_fresh(pane: &Pane, now: u64) -> bool {
 /// `OPEN`, `FOCUS <id>`, or `REPLACE <id>`, scoped to a concrete focused tab.
 /// Stable metadata identifies live Corral processes; the unique label detects
 /// restored/dead panes whose TTL token has expired.
+#[must_use]
 pub fn launch_decision(pane_list_json: &str) -> String {
     launch_decision_at(pane_list_json, now_secs())
 }
@@ -123,7 +125,7 @@ fn launch_decision_at(pane_list_json: &str, now: u64) -> String {
                 && pane.tokens.contains_key(SIDEBAR_TOKEN)
         })
         .filter_map(|pane| {
-            pane.pane_id
+            pane.id
                 .as_deref()
                 .filter(|id| flag_safe(id))
                 .map(|id| (pane, id))
@@ -137,11 +139,11 @@ fn launch_decision_at(pane_list_json: &str, now: u64) -> String {
     }
     candidates
         .first()
-        .map(|(_, id)| format!("REPLACE {id}"))
-        .unwrap_or_else(|| "OPEN".into())
+        .map_or_else(|| "OPEN".into(), |(_, id)| format!("REPLACE {id}"))
 }
 
 /// `LIVE` when `pane_id` has a fresh identity heartbeat.
+#[must_use]
 pub fn pane_live(pane_list_json: &str, pane_id: &str) -> String {
     let Ok(msg) = serde_json::from_str::<PaneListMsg>(strip_bom(pane_list_json)) else {
         return String::new();
@@ -149,13 +151,14 @@ pub fn pane_live(pane_list_json: &str, pane_id: &str) -> String {
     msg.result
         .panes
         .iter()
-        .find(|pane| pane.pane_id.as_deref() == Some(pane_id))
+        .find(|pane| pane.id.as_deref() == Some(pane_id))
         .filter(|pane| heartbeat_fresh(pane, now_secs()))
         .map(|_| "LIVE".to_string())
         .unwrap_or_default()
 }
 
 /// `<pane_id>\t<cwd>` for the focused pane, or empty on invalid input.
+#[must_use]
 pub fn focused_pane(pane_list_json: &str) -> String {
     let Ok(msg) = serde_json::from_str::<PaneListMsg>(strip_bom(pane_list_json)) else {
         return String::new();
@@ -163,7 +166,7 @@ pub fn focused_pane(pane_list_json: &str) -> String {
     let Some(pane) = msg.result.panes.iter().find(|pane| pane.focused) else {
         return String::new();
     };
-    let Some(id) = pane.pane_id.as_deref().filter(|id| flag_safe(id)) else {
+    let Some(id) = pane.id.as_deref().filter(|id| flag_safe(id)) else {
         return String::new();
     };
     format!("{id}\t{}", pane.cwd.as_deref().unwrap_or_default())
@@ -171,6 +174,7 @@ pub fn focused_pane(pane_list_json: &str) -> String {
 
 /// `<leftmost_pane_id>\t<ratio>` from `herdr pane layout` JSON.
 /// Ratio targets 32 columns, clamped for very wide/narrow panes.
+#[must_use]
 pub fn open_plan(layout_json: &str) -> String {
     let Ok(msg) = serde_json::from_str::<LayoutMsg>(strip_bom(layout_json)) else {
         return String::new();
@@ -180,27 +184,30 @@ pub fn open_plan(layout_json: &str) -> String {
         .layout
         .panes
         .iter()
-        .filter_map(|pane| Some((pane.pane_id.as_deref()?, pane.rect.as_ref()?)))
+        .filter_map(|pane| Some((pane.id.as_deref()?, pane.rect.as_ref()?)))
         .filter(|(id, rect)| flag_safe(id) && rect.width > 0)
         .min_by_key(|(_, rect)| (rect.x, rect.y));
     let Some((id, rect)) = best else {
         return String::new();
     };
-    let ratio = (TARGET_COLS / rect.width as f64).clamp(0.05, 0.9);
+    let ratio = (TARGET_COLS / i64_to_f64(rect.width)).clamp(0.05, 0.9);
     format!("{id}\t{ratio:.4}")
 }
 
 /// `<direction>\t<ratio-delta>` to return an existing left Corral pane to 32
 /// host-layout columns. The nearest innermost horizontal split whose divider
 /// matches the pane's right edge owns that width.
+#[must_use]
 pub fn resize_plan(layout_json: &str, pane_id: &str) -> String {
     resize_plan_to(layout_json, pane_id, TARGET_COLS)
 }
 
-/// Before splitting a narrow leftmost pane, grow it enough to hold a 32-column
+/// Before splitting a narrow leftmost pane, grow it enough to hold a 32-column Corral.
+///
 /// Corral plus Herdr's minimum surviving right child (~4 columns). Without this
 /// step a 32-column target splits into a 29+3 pair and cannot grow further once
 /// the inner ratio reaches its 0.9 ceiling.
+#[must_use]
 pub fn prepare_split_plan(layout_json: &str, pane_id: &str) -> String {
     let Ok(msg) = serde_json::from_str::<LayoutMsg>(strip_bom(layout_json)) else {
         return String::new();
@@ -210,9 +217,9 @@ pub fn prepare_split_plan(layout_json: &str, pane_id: &str) -> String {
         .layout
         .panes
         .iter()
-        .find(|pane| pane.pane_id.as_deref() == Some(pane_id))
+        .find(|pane| pane.id.as_deref() == Some(pane_id))
         .and_then(|pane| pane.rect.as_ref())
-        .map(|rect| rect.width as f64);
+        .map(|rect| i64_to_f64(rect.width));
     if width.is_none_or(|width| width >= TARGET_COLS + 4.0) {
         return String::new();
     }
@@ -227,7 +234,7 @@ fn resize_plan_to(layout_json: &str, pane_id: &str, target_cols: f64) -> String 
     let Some(pane_rect) = layout
         .panes
         .iter()
-        .find(|pane| pane.pane_id.as_deref() == Some(pane_id))
+        .find(|pane| pane.id.as_deref() == Some(pane_id))
         .and_then(|pane| pane.rect.as_ref())
     else {
         return String::new();
@@ -239,22 +246,32 @@ fn resize_plan_to(layout_json: &str, pane_id: &str, target_cols: f64) -> String 
         .filter(|split| split.direction.as_deref() == Some("right"))
         .filter_map(|split| Some((split.rect.as_ref()?, split.ratio?)))
         .filter(|(rect, ratio)| {
-            let divider = rect.x + (rect.width as f64 * ratio).round() as i64;
+            let offset = round_to_i64(i64_to_f64(rect.width) * ratio);
+            let divider = rect.x + offset;
             rect.x <= pane_rect.x && (divider - divider_x).abs() <= 2 && rect.width > 0
         })
         .min_by_key(|(rect, _)| rect.width);
     let Some((split_rect, _)) = split else {
         return String::new();
     };
-    if pane_rect.width == target_cols.round() as i64 {
+    if pane_rect.width == round_to_i64(target_cols) {
         return String::new();
     }
-    let delta = (target_cols - pane_rect.width as f64) / split_rect.width as f64;
+    let delta = (target_cols - i64_to_f64(pane_rect.width)) / i64_to_f64(split_rect.width);
     let direction = if delta > 0.0 { "right" } else { "left" };
     format!("{direction}\t{:.6}", delta.abs())
 }
 
+fn i64_to_f64(value: i64) -> f64 {
+    value.to_string().parse::<f64>().unwrap_or(0.0)
+}
+
+fn round_to_i64(v: f64) -> i64 {
+    format!("{v:.0}").parse::<i64>().unwrap_or(0)
+}
+
 /// Pane id from a `pane split` response, validated before shell argv use.
+#[must_use]
 pub fn split_pane_id(response_json: &str) -> String {
     #[derive(Deserialize)]
     struct Msg {
@@ -266,13 +283,14 @@ pub fn split_pane_id(response_json: &str) -> String {
     }
     #[derive(Deserialize)]
     struct PaneInfo {
-        pane_id: Option<String>,
+        #[serde(rename = "pane_id")]
+        id: Option<String>,
     }
 
     serde_json::from_str::<Msg>(strip_bom(response_json))
         .ok()
         .and_then(|msg| msg.result.pane)
-        .and_then(|pane| pane.pane_id)
+        .and_then(|pane| pane.id)
         .filter(|id| flag_safe(id))
         .unwrap_or_default()
 }

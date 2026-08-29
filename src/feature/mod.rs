@@ -27,63 +27,70 @@ pub enum Feature {
 }
 
 impl Feature {
-    pub const ALL: [Feature; 3] = [Feature::Explorer, Feature::Scm, Feature::GitHub];
+    pub const ALL: [Self; 3] = [Self::Explorer, Self::Scm, Self::GitHub];
 
-    pub fn title(self) -> &'static str {
+    #[must_use]
+    pub const fn title(self) -> &'static str {
         match self {
-            Feature::Explorer => "Explorer",
-            Feature::Scm => "Source Control",
-            Feature::GitHub => "GitHub",
+            Self::Explorer => "Explorer",
+            Self::Scm => "Source Control",
+            Self::GitHub => "GitHub",
         }
     }
 
-    pub fn id(self) -> &'static str {
+    #[must_use]
+    pub const fn id(self) -> &'static str {
         match self {
-            Feature::Explorer => "explorer",
-            Feature::Scm => "scm",
-            Feature::GitHub => "github",
+            Self::Explorer => "explorer",
+            Self::Scm => "scm",
+            Self::GitHub => "github",
         }
     }
 
-    pub fn icon(self, nerd_font: bool) -> &'static str {
+    #[must_use]
+    pub const fn icon(self, nerd_font: bool) -> &'static str {
         if nerd_font {
             match self {
-                Feature::Explorer => "\u{f07b}",
-                Feature::Scm => "\u{f126}",
-                Feature::GitHub => "\u{f09b}",
+                Self::Explorer => "\u{f07b}",
+                Self::Scm => "\u{f126}",
+                Self::GitHub => "\u{f09b}",
             }
         } else {
             match self {
-                Feature::Explorer => "E",
-                Feature::Scm => "S",
-                Feature::GitHub => "G",
+                Self::Explorer => "E",
+                Self::Scm => "S",
+                Self::GitHub => "G",
             }
         }
     }
 
-    pub fn icon_double_width(self, nerd_font: bool) -> bool {
+    #[must_use]
+    pub const fn icon_double_width(self, nerd_font: bool) -> bool {
         nerd_font
     }
 
-    pub fn from_digit(c: char) -> Option<Feature> {
+    #[must_use]
+    pub const fn from_digit(c: char) -> Option<Self> {
         match c {
-            '1' => Some(Feature::Explorer),
-            '2' => Some(Feature::Scm),
-            '3' => Some(Feature::GitHub),
+            '1' => Some(Self::Explorer),
+            '2' => Some(Self::Scm),
+            '3' => Some(Self::GitHub),
             _ => None,
         }
     }
 
-    pub fn index(self) -> usize {
+    #[must_use]
+    pub const fn index(self) -> usize {
         match self {
-            Feature::Explorer => 0,
-            Feature::Scm => 1,
-            Feature::GitHub => 2,
+            Self::Explorer => 0,
+            Self::Scm => 1,
+            Self::GitHub => 2,
         }
     }
 
-    pub fn from_index(i: usize) -> Option<Feature> {
-        Feature::ALL.get(i).copied()
+    #[must_use]
+    pub fn from_index(i: usize) -> Option<Self> {
+        Self::ALL.get(i).copied()
     }
 }
 
@@ -95,6 +102,7 @@ pub struct Views {
 }
 
 impl Views {
+    #[must_use]
     pub fn new(cwd: &std::path::Path, nerd_font: bool, config: Arc<Config>) -> Self {
         Self {
             explorer: ExplorerView::new(cwd.to_path_buf(), nerd_font, Arc::clone(&config)),

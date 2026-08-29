@@ -25,10 +25,11 @@ pub enum Mode {
 }
 
 impl Mode {
-    pub fn label(self) -> &'static str {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
         match self {
-            Mode::Plugin => "plugin",
-            Mode::Standalone => "standalone",
+            Self::Plugin => "plugin",
+            Self::Standalone => "standalone",
         }
     }
 }
@@ -59,21 +60,25 @@ pub struct LaunchContext {
 
 impl LaunchContext {
     /// True when launched by Herdr as a plugin.
+    #[must_use]
     pub fn is_plugin(&self) -> bool {
         self.mode == Mode::Plugin
     }
 
     /// Path to `herdr` for CLI callbacks, if known.
+    #[must_use]
     pub fn herdr_bin(&self) -> Option<&Path> {
         self.herdr_bin.as_deref()
     }
 
     /// This process's pane id, if Herdr injected one.
+    #[must_use]
     pub fn self_pane_id(&self) -> Option<&str> {
         self.self_pane_id.as_deref()
     }
 
     /// Invocation-time focused pane (neighbor), if known.
+    #[must_use]
     pub fn focused_pane_id(&self) -> Option<&str> {
         self.focused_pane_id.as_deref()
     }
@@ -144,8 +149,7 @@ fn parse_context(mode: Mode, json: Option<&str>, fallback_cwd: PathBuf) -> Launc
         .filter(|s| !s.is_empty())
         .or_else(|| raw.workspace_cwd.filter(|s| !s.is_empty()))
         .or_else(|| raw.cwd.filter(|s| !s.is_empty()))
-        .map(PathBuf::from)
-        .unwrap_or(fallback_cwd);
+        .map_or(fallback_cwd, PathBuf::from);
 
     LaunchContext {
         mode,

@@ -10,13 +10,13 @@ use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// A rendered page: styled lines plus any image placements (by line index).
-pub(crate) struct Page {
+pub struct Page {
     lines: Vec<Line<'static>>,
     images: Vec<ImagePlacement>,
 }
 
 impl Page {
-    pub(crate) fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             lines: Vec::new(),
             images: Vec::new(),
@@ -56,9 +56,279 @@ impl Page {
     }
 }
 
+struct MarkdownRenderer<'a> {
+    palette: &'a Palette,
+    width: usize,
+    out: Vec<Line<'static>>,
+    images: Vec<(usize, String, String)>,
+    segs: Vec<(String, Style)>,
+    link_url: Option<String>,
+    modifiers: Modifier,
+    link: bool,
+    heading: Option<HeadingLevel>,
+    quote_depth: usize,
+    in_code: bool,
+    list_stack: Vec<Option<u64>>,
+    item_pending_marker: Option<String>,
+    image_url: Option<String>,
+}
+
+impl<'a> MarkdownRenderer<'a> {
+    const fn new(width: usize, palette: &'a Palette) -> Self {
+        Self {
+            palette,
+            width,
+            out: Vec::new(),
+            images: Vec::new(),
+            segs: Vec::new(),
+            link_url: None,
+            modifiers: Modifier::empty(),
+            link: false,
+            heading: None,
+            quote_depth: 0,
+            in_code: false,
+            list_stack: Vec::new(),
+            item_pending_marker: None,
+            image_url: None,
+        }
+    }
+
+    fn seg_style(&self) -> Style {
+        if self.heading.is_some() {
+            return Style::default()
+                .fg(self.palette.accent)
+                .add_modifier(Modifier::BOLD);
+        }
+        let mut style = if self.quote_depth > 0 {
+            Style::default()
+                .fg(self.palette.subtext0)
+                .add_modifier(Modifier::ITALIC)
+        } else {
+            Style::default().fg(self.palette.text)
+        };
+        style = style.add_modifier(self.modifiers);
+        if self.link {
+            style = style
+                .fg(self.palette.blue)
+                .add_modifier(Modifier::UNDERLINED);
+        }
+        style
+    }
+
+    fn quote_prefix(&self) -> String {
+        "▏ ".repeat(self.quote_depth)
+    }
+
+    fn flush_block_with_prefix(&mut self) {
+        let prefix = self.quote_prefix();
+        let first = self.item_pending_marker.take();
+        flush_block(
+            &mut self.out,
+            &mut self.segs,
+            self.width,
+            &prefix,
+            first.as_deref(),
+            self.palette,
+        );
+    }
+
+    fn handle_tag_start(&mut self, tag: Tag<'_>) {
+        match tag {
+            Tag::Paragraph => self.segs.clear(),
+            Tag::Heading { level, .. } => {
+                self.heading = Some(level);
+                self.segs.clear();
+            }
+            Tag::Strong => self.modifiers.insert(Modifier::BOLD),
+            Tag::Emphasis => self.modifiers.insert(Modifier::ITALIC),
+            Tag::Strikethrough => self.modifiers.insert(Modifier::CROSSED_OUT),
+            Tag::Link { dest_url, .. } => {
+                self.flush_block_with_prefix();
+                self.link = true;
+                self.link_url = Some(dest_url.to_string());
+            }
+            Tag::BlockQuote(_) => self.quote_depth += 1,
+            Tag::List(start) => self.list_stack.push(start),
+            Tag::Item => {
+                let marker = match self.list_stack.last_mut() {
+                    Some(Some(n)) => {
+                        let marker = format!("{n}. ");
+                        *n += 1;
+                        marker
+                    }
+                    _ => "• ".to_string(),
+                };
+                self.item_pending_marker = Some(marker);
+                self.segs.clear();
+            }
+            Tag::CodeBlock(_) => {
+                flush_block(
+                    &mut self.out,
+                    &mut self.segs,
+                    self.width,
+                    "",
+                    None,
+                    self.palette,
+                );
+                self.in_code = true;
+            }
+            Tag::Image { dest_url, .. } => {
+                self.image_url = Some(dest_url.to_string());
+                self.segs.clear();
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_tag_end(&mut self, tag_end: TagEnd) {
+        match tag_end {
+            TagEnd::Paragraph | TagEnd::Heading(_) => {
+                if let Some(url) = take_lone_image_url(&mut self.segs) {
+                    push_image_link(&mut self.out, &mut self.images, url, "", self.palette);
+                    self.heading = None;
+                    self.out.push(Line::raw(String::new()));
+                    return;
+                }
+                self.flush_block_with_prefix();
+                self.heading = None;
+                self.out.push(Line::raw(String::new()));
+            }
+            TagEnd::Strong => self.modifiers.remove(Modifier::BOLD),
+            TagEnd::Emphasis => self.modifiers.remove(Modifier::ITALIC),
+            TagEnd::Strikethrough => self.modifiers.remove(Modifier::CROSSED_OUT),
+            TagEnd::Link => {
+                if let Some(url) = self.link_url.take() {
+                    if looks_like_image_url(&url) {
+                        let label: String =
+                            self.segs.iter().map(|(text, _)| text.as_str()).collect();
+                        let label = label.trim();
+                        if label.is_empty() || label == url {
+                            self.segs.clear();
+                            push_image_link(&mut self.out, &mut self.images, url, "", self.palette);
+                            self.link = false;
+                            return;
+                        }
+                    }
+                }
+                self.link = false;
+            }
+            TagEnd::BlockQuote(_) => self.quote_depth = self.quote_depth.saturating_sub(1),
+            TagEnd::List(_) => {
+                self.list_stack.pop();
+            }
+            TagEnd::Item => self.flush_block_with_prefix(),
+            TagEnd::CodeBlock => {
+                self.in_code = false;
+                self.out.push(Line::raw(String::new()));
+            }
+            TagEnd::Image => {
+                let alt: String = std::mem::take(&mut self.segs)
+                    .into_iter()
+                    .map(|(text, _)| text)
+                    .collect();
+                if let Some(url) = self.image_url.take() {
+                    flush_block(
+                        &mut self.out,
+                        &mut self.segs,
+                        self.width,
+                        "",
+                        None,
+                        self.palette,
+                    );
+                    push_image_link(&mut self.out, &mut self.images, url, &alt, self.palette);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_event(&mut self, event: MdEvent<'_>) {
+        match event {
+            MdEvent::Start(tag) => self.handle_tag_start(tag),
+            MdEvent::End(tag_end) => self.handle_tag_end(tag_end),
+            MdEvent::Html(html) | MdEvent::InlineHtml(html) => {
+                if let Some((url, alt)) = extract_html_img(&html) {
+                    flush_block(
+                        &mut self.out,
+                        &mut self.segs,
+                        self.width,
+                        "",
+                        None,
+                        self.palette,
+                    );
+                    push_image_link(&mut self.out, &mut self.images, url, &alt, self.palette);
+                }
+            }
+            MdEvent::Text(text) => {
+                if self.in_code {
+                    for line in text.lines() {
+                        self.out.push(Line::styled(
+                            format!("  {line}"),
+                            Style::default()
+                                .fg(self.palette.yellow)
+                                .bg(self.palette.surface0),
+                        ));
+                    }
+                } else {
+                    let style = self.seg_style();
+                    self.segs.push((text.to_string(), style));
+                }
+            }
+            MdEvent::Code(code) => self
+                .segs
+                .push((code.to_string(), Style::default().fg(self.palette.yellow))),
+            MdEvent::SoftBreak => self.segs.push((" ".to_string(), Style::default())),
+            MdEvent::HardBreak => {
+                flush_block(
+                    &mut self.out,
+                    &mut self.segs,
+                    self.width,
+                    "",
+                    None,
+                    self.palette,
+                );
+            }
+            MdEvent::Rule => {
+                flush_block(
+                    &mut self.out,
+                    &mut self.segs,
+                    self.width,
+                    "",
+                    None,
+                    self.palette,
+                );
+                self.out.push(Line::styled(
+                    "─".repeat(self.width),
+                    Style::default().fg(self.palette.surface1),
+                ));
+            }
+            MdEvent::TaskListMarker(done) => self.segs.push((
+                if done { "[x] ".into() } else { "[ ] ".into() },
+                Style::default().fg(self.palette.accent),
+            )),
+            _ => {}
+        }
+    }
+
+    fn finish(mut self) -> (Vec<Line<'static>>, Vec<(usize, String, String)>) {
+        flush_block(
+            &mut self.out,
+            &mut self.segs,
+            self.width,
+            "",
+            None,
+            self.palette,
+        );
+        while self.out.last().is_some_and(|line| line.width() == 0) {
+            self.out.pop();
+        }
+        (self.out, self.images)
+    }
+}
+
 /// Markdown → styled ratatui lines using pulldown-cmark for parsing. Returns
 /// the lines and `(line_index, url, alt)` for any images (as text links).
-pub(crate) fn render_markdown(
+pub fn render_markdown(
     text: &str,
     width: usize,
     palette: &Palette,
@@ -72,55 +342,6 @@ pub(crate) fn render_markdown(
             Vec::new(),
         );
     }
-    let mut out: Vec<Line<'static>> = Vec::new();
-    let mut images: Vec<(usize, String, String)> = Vec::new();
-    let mut segs: Vec<(String, Style)> = Vec::new();
-    let mut link_url: Option<String> = None;
-    let (mut bold, mut italic, mut strike, mut link) = (false, false, false, false);
-    let mut heading: Option<HeadingLevel> = None;
-    let mut quote_depth: usize = 0;
-    let mut in_code = false;
-    let mut list_stack: Vec<Option<u64>> = Vec::new();
-    let mut item_pending_marker: Option<String> = None;
-    let mut image_url: Option<String> = None;
-
-    let seg_style = |bold: bool,
-                     italic: bool,
-                     strike: bool,
-                     link: bool,
-                     heading: Option<HeadingLevel>,
-                     quote: usize| {
-        if let Some(_level) = heading {
-            return Style::default()
-                .fg(palette.accent)
-                .add_modifier(Modifier::BOLD);
-        }
-        let mut style = if quote > 0 {
-            Style::default()
-                .fg(palette.subtext0)
-                .add_modifier(Modifier::ITALIC)
-        } else {
-            Style::default().fg(palette.text)
-        };
-        if bold {
-            style = style.add_modifier(Modifier::BOLD);
-        }
-        if italic {
-            style = style.add_modifier(Modifier::ITALIC);
-        }
-        if strike {
-            style = style.add_modifier(Modifier::CROSSED_OUT);
-        }
-        if link {
-            style = style.fg(palette.blue).add_modifier(Modifier::UNDERLINED);
-        }
-        style
-    };
-
-    let quote_prefix = |depth: usize| "▏ ".repeat(depth);
-
-    // ENABLE_GFM turns bare `https://...` lines into autolinks so GitHub
-    // attachment URLs can be promoted to image rows.
     let parser = Parser::new_ext(
         text,
         Options::ENABLE_STRIKETHROUGH
@@ -128,209 +349,21 @@ pub(crate) fn render_markdown(
             | Options::ENABLE_TASKLISTS
             | Options::ENABLE_GFM,
     );
+    let mut renderer = MarkdownRenderer::new(width, palette);
     for event in parser {
-        match event {
-            MdEvent::Start(Tag::Paragraph | Tag::Heading { .. }) => {
-                if let Tag::Heading { level, .. } = event_heading(&event) {
-                    heading = Some(level);
-                }
-                segs.clear();
-            }
-            MdEvent::End(TagEnd::Paragraph | TagEnd::Heading(_)) => {
-                // GitHub often pastes a bare attachment URL as its own paragraph.
-                // pulldown-cmark keeps those as plain text, so promote them here.
-                if let Some(url) = take_lone_image_url(&mut segs) {
-                    push_image_link(&mut out, &mut images, url, "", palette);
-                    heading = None;
-                    out.push(Line::raw(String::new()));
-                    continue;
-                }
-                let prefix = quote_prefix(quote_depth);
-                let first = item_pending_marker.take();
-                flush_block(
-                    &mut out,
-                    &mut segs,
-                    width,
-                    &prefix,
-                    first.as_deref(),
-                    palette,
-                );
-                heading = None;
-                out.push(Line::raw(String::new()));
-            }
-            MdEvent::Start(Tag::Strong) => bold = true,
-            MdEvent::End(TagEnd::Strong) => bold = false,
-            MdEvent::Start(Tag::Emphasis) => italic = true,
-            MdEvent::End(TagEnd::Emphasis) => italic = false,
-            MdEvent::Start(Tag::Strikethrough) => strike = true,
-            MdEvent::End(TagEnd::Strikethrough) => strike = false,
-            MdEvent::Start(Tag::Link { dest_url, .. }) => {
-                // Flush preceding text so an image-looking href cannot swallow
-                // the rest of the paragraph as "alt".
-                let prefix = quote_prefix(quote_depth);
-                let first = item_pending_marker.take();
-                flush_block(
-                    &mut out,
-                    &mut segs,
-                    width,
-                    &prefix,
-                    first.as_deref(),
-                    palette,
-                );
-                link = true;
-                link_url = Some(dest_url.to_string());
-            }
-            MdEvent::End(TagEnd::Link) => {
-                // Promote only when the link body is empty/equal to the URL
-                // (autolink / bare attachment). Labeled links stay as links.
-                if let Some(url) = link_url.take() {
-                    if looks_like_image_url(&url) {
-                        let label: String = segs.iter().map(|(text, _)| text.as_str()).collect();
-                        let label = label.trim();
-                        if label.is_empty() || label == url {
-                            segs.clear();
-                            push_image_link(&mut out, &mut images, url, "", palette);
-                            link = false;
-                            continue;
-                        }
-                    }
-                }
-                link = false;
-            }
-            MdEvent::Start(Tag::BlockQuote(_)) => quote_depth += 1,
-            MdEvent::End(TagEnd::BlockQuote(_)) => quote_depth = quote_depth.saturating_sub(1),
-            MdEvent::Start(Tag::List(start)) => list_stack.push(start),
-            MdEvent::End(TagEnd::List(_)) => {
-                list_stack.pop();
-            }
-            MdEvent::Start(Tag::Item) => {
-                let marker = match list_stack.last_mut() {
-                    Some(Some(n)) => {
-                        let marker = format!("{n}. ");
-                        *n += 1;
-                        marker
-                    }
-                    _ => "• ".to_string(),
-                };
-                item_pending_marker = Some(marker);
-                segs.clear();
-            }
-            MdEvent::End(TagEnd::Item) => {
-                let prefix = quote_prefix(quote_depth);
-                let first = item_pending_marker.take();
-                flush_block(
-                    &mut out,
-                    &mut segs,
-                    width,
-                    &prefix,
-                    first.as_deref(),
-                    palette,
-                );
-            }
-            MdEvent::Start(Tag::CodeBlock(_)) => {
-                flush_block(&mut out, &mut segs, width, "", None, palette);
-                in_code = true;
-            }
-            MdEvent::End(TagEnd::CodeBlock) => {
-                in_code = false;
-                out.push(Line::raw(String::new()));
-            }
-            MdEvent::Start(Tag::Image { dest_url, .. }) => {
-                image_url = Some(dest_url.to_string());
-                segs.clear();
-            }
-            MdEvent::End(TagEnd::Image) => {
-                let alt: String = std::mem::take(&mut segs)
-                    .into_iter()
-                    .map(|(text, _)| text)
-                    .collect();
-                if let Some(url) = image_url.take() {
-                    flush_block(&mut out, &mut segs, width, "", None, palette);
-                    push_image_link(&mut out, &mut images, url, &alt, palette);
-                }
-            }
-            // GitHub comments often paste raw HTML <img> tags instead of
-            // markdown images. Capture both block and inline forms.
-            MdEvent::Html(html) | MdEvent::InlineHtml(html) => {
-                if let Some((url, alt)) = extract_html_img(&html) {
-                    flush_block(&mut out, &mut segs, width, "", None, palette);
-                    push_image_link(&mut out, &mut images, url, &alt, palette);
-                }
-            }
-            MdEvent::Text(text) => {
-                if in_code {
-                    // Fenced code blocks keep a full-line surface so multi-line
-                    // snippets read as a block; inline code does not (see Code).
-                    for line in text.lines() {
-                        out.push(Line::styled(
-                            format!("  {line}"),
-                            Style::default().fg(palette.yellow).bg(palette.surface0),
-                        ));
-                    }
-                } else {
-                    segs.push((
-                        text.to_string(),
-                        seg_style(bold, italic, strike, link, heading, quote_depth),
-                    ));
-                }
-            }
-            // Inline `code` is color-only. A per-token bg chip looks fine for a
-            // few spans, but checklist-heavy issue bodies (many `path`/`ident`
-            // tokens) turn into a speckled field of gray blocks. Keep fenced
-            // code blocks' surface0 fill above; do not paint inline chips.
-            MdEvent::Code(code) => segs.push((
-                code.to_string(),
-                Style::default().fg(palette.yellow),
-            )),
-            MdEvent::SoftBreak => {
-                // Keep an explicit space so flush_block re-joins words.
-                segs.push((" ".to_string(), Style::default()));
-            }
-            MdEvent::HardBreak => {
-                flush_block(&mut out, &mut segs, width, "", None, palette);
-            }
-            MdEvent::Rule => {
-                flush_block(&mut out, &mut segs, width, "", None, palette);
-                out.push(Line::styled(
-                    "─".repeat(width),
-                    Style::default().fg(palette.surface1),
-                ));
-            }
-            MdEvent::TaskListMarker(done) => segs.push((
-                if done { "[x] ".into() } else { "[ ] ".into() },
-                Style::default().fg(palette.accent),
-            )),
-            _ => {}
-        }
+        renderer.handle_event(event);
     }
-    flush_block(&mut out, &mut segs, width, "", None, palette);
-    while out.last().is_some_and(|line| line.width() == 0) {
-        out.pop();
-    }
-    (out, images)
-}
-
-pub(crate) fn event_heading(event: &MdEvent) -> Tag<'static> {
-    if let MdEvent::Start(Tag::Heading { level, .. }) = event {
-        Tag::Heading {
-            level: *level,
-            id: None,
-            classes: Vec::new(),
-            attrs: Vec::new(),
-        }
-    } else {
-        Tag::Paragraph
-    }
+    renderer.finish()
 }
 
 /// Terminal display columns for a string (CJK/emoji = 2, ASCII = 1).
-pub(crate) fn display_width(text: &str) -> usize {
+pub fn display_width(text: &str) -> usize {
     UnicodeWidthStr::width(text)
 }
 
 /// Split `text` into pieces that each fit within `max_cols` terminal columns.
 /// CJK runs have no spaces, so we must break by display width, not by words.
-pub(crate) fn split_to_width(text: &str, max_cols: usize) -> Vec<String> {
+pub fn split_to_width(text: &str, max_cols: usize) -> Vec<String> {
     let max_cols = max_cols.max(1);
     if text.is_empty() {
         return vec![String::new()];
@@ -368,7 +401,7 @@ pub(crate) fn split_to_width(text: &str, max_cols: usize) -> Vec<String> {
 /// Width is measured in *terminal columns* (unicode-width), not Unicode scalar
 /// counts. Without that, CJK paragraphs overflow and the host terminal rewraps
 /// mid-glyph, which looks like broken markdown / tofu blocks.
-pub(crate) fn flush_block(
+pub fn flush_block(
     out: &mut Vec<Line<'static>>,
     segs: &mut Vec<(String, Style)>,
     width: usize,
@@ -473,7 +506,7 @@ pub(crate) fn flush_block(
     }
 }
 
-pub(crate) fn wrap_text(text: &str, width: usize) -> Vec<String> {
+pub fn wrap_text(text: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
     if text.is_empty() {
         return vec![String::new()];

@@ -46,7 +46,7 @@ fn visible_name(name: &str, show_hidden: bool) -> bool {
     name != ".git" && (show_hidden || !name.starts_with('.'))
 }
 
-/// Move a path to the desktop trash via FreeDesktop `gio trash`.
+/// Move a path to the desktop trash via `FreeDesktop` `gio trash`.
 /// Never permanently unlink from Explorer.
 fn trash_path(path: &Path) -> Result<(), String> {
     if !path.exists() {
@@ -172,8 +172,7 @@ impl ExplorerView {
             body_height: Cell::new(0),
             nerd_font,
             show_hidden: std::env::var("CORRAL_SHOW_HIDDEN")
-                .map(|v| v != "0" && v != "false")
-                .unwrap_or(true),
+                .map_or(true, |v| v != "0" && v != "false"),
             error: None,
             notice: watch_notice,
             notice_at,
@@ -236,11 +235,11 @@ impl ExplorerView {
 
         let mut entries: Vec<(PathBuf, String, bool)> = fs::read_dir(dir)
             .map_err(|e| format!("read {}: {e}", dir.display()))?
-            .filter_map(|res| res.ok())
+            .filter_map(std::result::Result::ok)
             .filter(|e| visible_name(&e.file_name().to_string_lossy(), self.show_hidden))
             .map(|e| {
                 let path = e.path();
-                let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                let is_dir = e.file_type().is_ok_and(|t| t.is_dir());
                 let name = e.file_name().to_string_lossy().into_owned();
                 (path, name, is_dir)
             })
@@ -284,13 +283,23 @@ impl ExplorerView {
         if self.rows.is_empty() {
             return;
         }
-        let n = self.rows.len() as isize;
-        self.selected = (self.selected as isize + delta).clamp(0, n - 1) as usize;
+        let len = self.rows.len();
+        if delta >= 0 {
+            let delta = usize::try_from(delta).unwrap_or(usize::MAX);
+            self.selected = self
+                .selected
+                .saturating_add(delta)
+                .min(len.saturating_sub(1));
+        } else {
+            let delta = usize::try_from(-delta).unwrap_or(usize::MAX);
+            self.selected = self.selected.saturating_sub(delta);
+        }
         self.ensure_visible();
     }
 
     fn move_page(&mut self, pages: isize) {
-        let page = self.body_height.get().max(2).saturating_sub(1) as isize;
+        let page =
+            isize::try_from(self.body_height.get().max(2).saturating_sub(1)).unwrap_or(isize::MAX);
         self.move_sel(page.saturating_mul(pages));
     }
 
@@ -301,10 +310,9 @@ impl ExplorerView {
             return KeyOutcome::Handled;
         };
         if !entry.is_dir {
-            return self.run_open(&entry.path);
+            return Self::run_open(&entry.path);
         }
-        if !self.expanded.contains(&entry.path) {
-            self.expanded.insert(entry.path);
+        if self.expanded.insert(entry.path) {
             self.rebuild();
             return KeyOutcome::Handled;
         }
@@ -348,8 +356,7 @@ impl ExplorerView {
                     entry
                         .path
                         .parent()
-                        .map(Path::to_path_buf)
-                        .unwrap_or_else(|| self.root.clone())
+                        .map_or_else(|| self.root.clone(), Path::to_path_buf)
                 }
             },
         );
@@ -439,9 +446,9 @@ impl ExplorerView {
                 self.expanded = self
                     .expanded
                     .drain()
-                    .map(|path| match path.strip_prefix(&from) {
-                        Ok(suffix) => target.join(suffix),
-                        Err(_) => path,
+                    .map(|path| {
+                        path.strip_prefix(&from)
+                            .map_or_else(|_| path.clone(), |suffix| target.join(suffix))
                     })
                     .collect();
                 Ok((target, format!("renamed to {}", input.trim())))
@@ -538,11 +545,11 @@ impl ExplorerView {
             self.rebuild();
             KeyOutcome::Handled
         } else {
-            self.run_open(&entry.path)
+            Self::run_open(&entry.path)
         }
     }
 
-    fn run_open(&mut self, path: &Path) -> KeyOutcome {
+    fn run_open(path: &Path) -> KeyOutcome {
         // Shell actions may take the TTY; shell suspends the terminal first.
         KeyOutcome::Shell {
             action: config::internal::OPEN.into(),
@@ -667,7 +674,7 @@ impl ExplorerView {
                 if entry.is_dir {
                     self.toggle_or_open()
                 } else {
-                    self.run_open(&entry.path.clone())
+                    Self::run_open(&entry.path.clone())
                 }
             }
             // Custom shell function from config.sh
@@ -680,6 +687,158 @@ impl ExplorerView {
                 }
             }
         }
+    }
+
+    fn draw_workspace_header(&self, frame: &mut Frame, area: Rect, palette: &Palette) {
+        let workspace = self
+            .root
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| self.root.display().to_string());
+        frame.render_widget(
+            Paragraph::new(format!(" ▾ {}", workspace.to_uppercase())).style(
+                Style::default()
+                    .fg(palette.text)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Rect::new(area.x, area.y, area.width, 1),
+        );
+    }
+
+    fn draw_tree_row(
+        &self,
+        frame: &mut Frame,
+        entry: &Entry,
+        selected: bool,
+        rect: Rect,
+        palette: &Palette,
+    ) {
+        let indent = "  ".repeat(entry.depth);
+        let file_icon = self.glyph_for(entry);
+        let chevron = if entry.is_dir {
+            if self.expanded.contains(&entry.path) {
+                "▾ "
+            } else {
+                "▸ "
+            }
+        } else {
+            "  "
+        };
+        let name_fg = if entry.is_dir {
+            palette.accent
+        } else {
+            palette.text
+        };
+        let icon_fg = if entry.is_dir {
+            palette.accent
+        } else {
+            file_icon.color.unwrap_or(palette.text)
+        };
+        let selected_bg = selected.then_some(palette.surface1);
+        let with_bg = |style: Style| selected_bg.map_or(style, |bg| style.bg(bg));
+        let emphasis = if selected {
+            Modifier::BOLD
+        } else {
+            Modifier::empty()
+        };
+        let line = Line::from(vec![
+            Span::styled(indent, with_bg(Style::default().fg(palette.overlay1))),
+            Span::styled(chevron, with_bg(Style::default().fg(name_fg))),
+            Span::styled(
+                format!("{} ", file_icon.glyph),
+                with_bg(Style::default().fg(icon_fg).add_modifier(emphasis)),
+            ),
+            Span::styled(
+                entry.name.as_str(),
+                with_bg(Style::default().fg(name_fg).add_modifier(emphasis)),
+            ),
+        ]);
+        frame.render_widget(Paragraph::new(line).style(with_bg(Style::default())), rect);
+    }
+
+    fn draw_tree(&self, frame: &mut Frame, area: Rect, palette: &Palette) {
+        if let Some(err) = &self.error {
+            frame.render_widget(
+                Paragraph::new(err.as_str()).style(Style::default().fg(palette.red)),
+                area,
+            );
+            return;
+        }
+        if self.rows.is_empty() {
+            frame.render_widget(
+                Paragraph::new("  (empty)").style(Style::default().fg(palette.overlay1)),
+                area,
+            );
+        }
+        for (i, entry) in self
+            .rows
+            .iter()
+            .skip(self.scroll)
+            .take(usize::from(area.height))
+            .enumerate()
+        {
+            let rect = Rect {
+                x: area.x,
+                y: area.y.saturating_add(u16::try_from(i).unwrap_or(u16::MAX)),
+                width: area.width,
+                height: 1,
+            };
+            self.draw_tree_row(
+                frame,
+                entry,
+                self.scroll + i == self.selected,
+                rect,
+                palette,
+            );
+        }
+    }
+
+    fn footer_content(&self) -> (String, bool) {
+        match &self.pending {
+            Some(PendingEdit::Create { .. } | PendingEdit::Rename { .. }) => {
+                let mut input = self.input.clone();
+                input.insert(self.cursor.min(input.len()), '│');
+                let input: String = input.into_iter().collect();
+                let label = if matches!(self.pending, Some(PendingEdit::Create { .. })) {
+                    " New: "
+                } else {
+                    " Rename: "
+                };
+                (format!("{label}{input}"), false)
+            }
+            Some(PendingEdit::Delete { path }) => (
+                format!(
+                    " Delete {}?",
+                    path.file_name().map_or_else(
+                        || path.display().to_string().into(),
+                        |name| name.to_string_lossy()
+                    )
+                ),
+                true,
+            ),
+            None => self
+                .notice
+                .clone()
+                .unwrap_or_else(|| (String::new(), false)),
+        }
+    }
+
+    fn draw_footer(&self, frame: &mut Frame, area: Rect, palette: &Palette) {
+        let (text, error) = self.footer_content();
+        frame.render_widget(
+            Paragraph::new(text).style(
+                Style::default()
+                    .fg(if error { palette.red } else { palette.text })
+                    .bg(palette.surface0),
+            ),
+            Rect::new(
+                area.x,
+                area.y.saturating_add(area.height.saturating_sub(1)),
+                area.width,
+                1,
+            ),
+        );
     }
 }
 
@@ -697,156 +856,14 @@ impl FeatureView for ExplorerView {
         self.body_top.set(tree_top);
         self.body_height.set(tree_height);
 
-        let workspace = self
-            .root
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| self.root.display().to_string());
-        frame.render_widget(
-            Paragraph::new(format!(" ▾ {}", workspace.to_uppercase())).style(
-                Style::default()
-                    .fg(palette.text)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Rect::new(area.x, area.y, area.width, 1),
+        self.draw_workspace_header(frame, area, palette);
+        self.draw_tree(
+            frame,
+            Rect::new(area.x, tree_top, area.width, tree_height),
+            palette,
         );
-
-        let tree_area = Rect::new(area.x, tree_top, area.width, tree_height);
-        if let Some(err) = &self.error {
-            frame.render_widget(
-                Paragraph::new(err.as_str()).style(Style::default().fg(palette.red)),
-                tree_area,
-            );
-            return;
-        }
-        if self.rows.is_empty() {
-            frame.render_widget(
-                Paragraph::new("  (empty)").style(Style::default().fg(palette.overlay1)),
-                tree_area,
-            );
-        }
-
-        let h = tree_height as usize;
-        for (i, entry) in self.rows.iter().skip(self.scroll).take(h).enumerate() {
-            let y = tree_top.saturating_add(i as u16);
-            let abs = self.scroll + i;
-            let selected = abs == self.selected;
-            let indent = "  ".repeat(entry.depth);
-            let file_icon = self.glyph_for(entry);
-            let chevron = if entry.is_dir {
-                if self.expanded.contains(&entry.path) {
-                    "▾ "
-                } else {
-                    "▸ "
-                }
-            } else {
-                "  "
-            };
-
-            // Directories use Herdr's actual theme accent, not the semantic
-            // blue slot. For Everforest this is #a7c080; changing the active
-            // Arch theme changes the accent automatically.
-            let name_fg = if entry.is_dir {
-                palette.accent
-            } else {
-                palette.text
-            };
-            let icon_fg = if entry.is_dir {
-                palette.accent
-            } else {
-                file_icon.color.unwrap_or(palette.text)
-            };
-            let name_style = if selected {
-                Style::default()
-                    .fg(name_fg)
-                    .bg(palette.surface1)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(name_fg)
-            };
-            let icon_style = if selected {
-                Style::default()
-                    .fg(icon_fg)
-                    .bg(palette.surface1)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(icon_fg)
-            };
-            let dim = if selected {
-                Style::default().fg(palette.overlay1).bg(palette.surface1)
-            } else {
-                Style::default().fg(palette.overlay1)
-            };
-            let chevron_style = if selected {
-                Style::default().fg(name_fg).bg(palette.surface1)
-            } else {
-                Style::default().fg(name_fg)
-            };
-
-            let line = Line::from(vec![
-                Span::styled(indent, dim),
-                Span::styled(chevron, chevron_style),
-                Span::styled(format!("{} ", file_icon.glyph), icon_style),
-                Span::styled(entry.name.as_str(), name_style),
-            ]);
-            let row_style = if selected {
-                Style::default().bg(palette.surface1)
-            } else {
-                Style::default()
-            };
-            frame.render_widget(
-                Paragraph::new(line).style(row_style),
-                Rect {
-                    x: area.x,
-                    y,
-                    width: area.width,
-                    height: 1,
-                },
-            );
-        }
-
         if has_footer {
-            let footer = Rect::new(
-                area.x,
-                area.y.saturating_add(area.height.saturating_sub(1)),
-                area.width,
-                1,
-            );
-            let (text, error) = match &self.pending {
-                Some(PendingEdit::Create { .. }) | Some(PendingEdit::Rename { .. }) => {
-                    let mut input = self.input.clone();
-                    input.insert(self.cursor.min(input.len()), '│');
-                    let input: String = input.into_iter().collect();
-                    let label = if matches!(self.pending, Some(PendingEdit::Create { .. })) {
-                        " New: "
-                    } else {
-                        " Rename: "
-                    };
-                    (format!("{label}{input}"), false)
-                }
-                Some(PendingEdit::Delete { path }) => (
-                    format!(
-                        " Delete {}?",
-                        path.file_name()
-                            .map(|name| name.to_string_lossy())
-                            .unwrap_or_else(|| path.display().to_string().into())
-                    ),
-                    true,
-                ),
-                None => self
-                    .notice
-                    .clone()
-                    .unwrap_or_else(|| (String::new(), false)),
-            };
-            frame.render_widget(
-                Paragraph::new(text).style(
-                    Style::default()
-                        .fg(if error { palette.red } else { palette.text })
-                        .bg(palette.surface0),
-                ),
-                footer,
-            );
+            self.draw_footer(frame, area, palette);
         }
     }
 
@@ -976,14 +993,14 @@ mod tests {
         let mut view = ExplorerView::new(root.clone(), false, Arc::new(Config::for_test()));
         assert!(view.rows.is_empty()); // workspace root is a header, never a tree row
         view.set_notice("created", false);
-        view.notice_at = Some(Instant::now() - Duration::from_secs(3));
+        view.notice_at = Some(Instant::now().checked_sub(Duration::from_secs(3)).unwrap());
         view.expire_notice();
         assert!(view.notice.is_none());
         view.set_notice("failed", true);
-        view.notice_at = Some(Instant::now() - Duration::from_secs(3));
+        view.notice_at = Some(Instant::now().checked_sub(Duration::from_secs(3)).unwrap());
         view.expire_notice();
         assert!(view.notice.is_some());
-        view.notice_at = Some(Instant::now() - Duration::from_secs(5));
+        view.notice_at = Some(Instant::now().checked_sub(Duration::from_secs(5)).unwrap());
         view.expire_notice();
         assert!(view.notice.is_none());
 

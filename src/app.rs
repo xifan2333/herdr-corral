@@ -55,7 +55,11 @@ impl State {
 }
 
 /// Run the sidebar TUI until the user quits.
-pub fn run(ctx: LaunchContext) -> io::Result<()> {
+///
+/// # Errors
+///
+/// Returns an [`io::Error`] if terminal setup, event reading, or shell action execution fails.
+pub fn run(ctx: &LaunchContext) -> io::Result<()> {
     let _ = std::env::set_current_dir(&ctx.cwd);
 
     let palette = Palette::resolve();
@@ -63,7 +67,7 @@ pub fn run(ctx: LaunchContext) -> io::Result<()> {
     let config = Arc::new(Config::load());
     // TermGuard restores the terminal on Drop (normal return *and* panic).
     let mut term = TermGuard::enter()?;
-    event_loop(term.terminal(), &palette, use_nf, &ctx, config)
+    event_loop(term.terminal(), &palette, use_nf, ctx, config)
 }
 
 fn event_loop(
@@ -169,8 +173,8 @@ fn run_shell_action(
 ) -> io::Result<bool> {
     // Hosted (Herdr / WezTerm) actions use side-pane reuse — never leave the
     // alt-screen. Standalone $EDITOR still gets a real TTY after probing.
-    let hosted = std::env::var_os("HERDR_ENV").is_some()
-        || std::env::var_os("WEZTERM_PANE").is_some();
+    let hosted =
+        std::env::var_os("HERDR_ENV").is_some() || std::env::var_os("WEZTERM_PANE").is_some();
 
     if hosted {
         // Keep TUI up; capture action stdout/stderr.
@@ -334,7 +338,7 @@ impl TermGuard {
         }
     }
 
-    fn terminal(&mut self) -> &mut Terminal<CrosstermBackend<Stdout>> {
+    const fn terminal(&mut self) -> &mut Terminal<CrosstermBackend<Stdout>> {
         &mut self.terminal
     }
 

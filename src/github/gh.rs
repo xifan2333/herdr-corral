@@ -24,7 +24,8 @@ pub struct GhCli {
 }
 
 impl GhCli {
-    pub fn new(cwd: PathBuf) -> Self {
+    #[must_use]
+    pub const fn new(cwd: PathBuf) -> Self {
         Self { cwd }
     }
 
@@ -178,6 +179,164 @@ fn repository_from(raw: RepoJson) -> Result<Repository, String> {
     })
 }
 
+fn issue_mutation_args<'a>(
+    repo: &str,
+    mutation: &'a GitHubMutation,
+) -> Option<(Vec<String>, Option<&'a str>)> {
+    match mutation {
+        GitHubMutation::IssueComment { number, body } => Some((
+            vec![
+                "issue".into(),
+                "comment".into(),
+                number.to_string(),
+                "--repo".into(),
+                repo.into(),
+                "--body-file".into(),
+                "-".into(),
+            ],
+            Some(body.as_str()),
+        )),
+        GitHubMutation::IssueState { number, open } => Some((
+            vec![
+                "issue".into(),
+                if *open { "reopen" } else { "close" }.into(),
+                number.to_string(),
+                "--repo".into(),
+                repo.into(),
+            ],
+            None,
+        )),
+        _ => None,
+    }
+}
+
+fn pull_mutation_args<'a>(
+    repo: &str,
+    mutation: &'a GitHubMutation,
+) -> Option<(Vec<String>, Option<&'a str>)> {
+    match mutation {
+        GitHubMutation::PullComment { number, body } => Some((
+            vec![
+                "pr".into(),
+                "comment".into(),
+                number.to_string(),
+                "--repo".into(),
+                repo.into(),
+                "--body-file".into(),
+                "-".into(),
+            ],
+            Some(body.as_str()),
+        )),
+        GitHubMutation::PullApprove { number } => Some((
+            vec![
+                "pr".into(),
+                "review".into(),
+                number.to_string(),
+                "--repo".into(),
+                repo.into(),
+                "--approve".into(),
+            ],
+            None,
+        )),
+        GitHubMutation::PullRequestChanges { number, body } => Some((
+            vec![
+                "pr".into(),
+                "review".into(),
+                number.to_string(),
+                "--repo".into(),
+                repo.into(),
+                "--request-changes".into(),
+                "--body-file".into(),
+                "-".into(),
+            ],
+            Some(body.as_str()),
+        )),
+        GitHubMutation::PullMerge {
+            number,
+            head_sha,
+            method,
+        } => Some((
+            vec![
+                "pr".into(),
+                "merge".into(),
+                number.to_string(),
+                "--repo".into(),
+                repo.into(),
+                method.flag().into(),
+                "--match-head-commit".into(),
+                head_sha.clone(),
+            ],
+            None,
+        )),
+        GitHubMutation::PullState { number, open } => Some((
+            vec![
+                "pr".into(),
+                if *open { "reopen" } else { "close" }.into(),
+                number.to_string(),
+                "--repo".into(),
+                repo.into(),
+            ],
+            None,
+        )),
+        _ => None,
+    }
+}
+
+fn run_mutation_args<'a>(
+    repo: &str,
+    mutation: &'a GitHubMutation,
+) -> (Vec<String>, Option<&'a str>) {
+    match mutation {
+        GitHubMutation::RunCancel { run_id } => (
+            vec![
+                "run".into(),
+                "cancel".into(),
+                run_id.to_string(),
+                "--repo".into(),
+                repo.into(),
+            ],
+            None,
+        ),
+        GitHubMutation::RunRerun {
+            run_id,
+            failed_only,
+        } => {
+            let mut args = vec![
+                "run".into(),
+                "rerun".into(),
+                run_id.to_string(),
+                "--repo".into(),
+                repo.into(),
+            ];
+            if *failed_only {
+                args.push("--failed".into());
+            }
+            (args, None)
+        }
+        GitHubMutation::WorkflowDispatch {
+            workflow,
+            r#ref,
+            inputs,
+        } => {
+            let mut args = vec![
+                "workflow".into(),
+                "run".into(),
+                workflow.clone(),
+                "--repo".into(),
+                repo.into(),
+                "--ref".into(),
+                r#ref.clone(),
+            ];
+            for (key, value) in inputs {
+                args.push("-f".into());
+                args.push(format!("{key}={value}"));
+            }
+            (args, None)
+        }
+        _ => (Vec::new(), None),
+    }
+}
+
 impl GitHubDetailAdapter for GhCli {
     fn issue_detail(&self, repo: &str, number: u64) -> Result<IssueDetail, String> {
         self.json(&[
@@ -238,139 +397,9 @@ impl GitHubDetailAdapter for GhCli {
     }
 
     fn mutate(&self, repo: &str, mutation: &GitHubMutation) -> Result<String, String> {
-        let (args, input): (Vec<String>, Option<&str>) = match mutation {
-            GitHubMutation::IssueComment { number, body } => (
-                vec![
-                    "issue".into(),
-                    "comment".into(),
-                    number.to_string(),
-                    "--repo".into(),
-                    repo.into(),
-                    "--body-file".into(),
-                    "-".into(),
-                ],
-                Some(body),
-            ),
-            GitHubMutation::IssueState { number, open } => (
-                vec![
-                    "issue".into(),
-                    if *open { "reopen" } else { "close" }.into(),
-                    number.to_string(),
-                    "--repo".into(),
-                    repo.into(),
-                ],
-                None,
-            ),
-            GitHubMutation::PullComment { number, body } => (
-                vec![
-                    "pr".into(),
-                    "comment".into(),
-                    number.to_string(),
-                    "--repo".into(),
-                    repo.into(),
-                    "--body-file".into(),
-                    "-".into(),
-                ],
-                Some(body),
-            ),
-            GitHubMutation::PullApprove { number } => (
-                vec![
-                    "pr".into(),
-                    "review".into(),
-                    number.to_string(),
-                    "--repo".into(),
-                    repo.into(),
-                    "--approve".into(),
-                ],
-                None,
-            ),
-            GitHubMutation::PullRequestChanges { number, body } => (
-                vec![
-                    "pr".into(),
-                    "review".into(),
-                    number.to_string(),
-                    "--repo".into(),
-                    repo.into(),
-                    "--request-changes".into(),
-                    "--body-file".into(),
-                    "-".into(),
-                ],
-                Some(body),
-            ),
-            GitHubMutation::PullMerge {
-                number,
-                head_sha,
-                method,
-            } => (
-                vec![
-                    "pr".into(),
-                    "merge".into(),
-                    number.to_string(),
-                    "--repo".into(),
-                    repo.into(),
-                    method.flag().into(),
-                    "--match-head-commit".into(),
-                    head_sha.clone(),
-                ],
-                None,
-            ),
-            GitHubMutation::PullState { number, open } => (
-                vec![
-                    "pr".into(),
-                    if *open { "reopen" } else { "close" }.into(),
-                    number.to_string(),
-                    "--repo".into(),
-                    repo.into(),
-                ],
-                None,
-            ),
-            GitHubMutation::RunCancel { run_id } => (
-                vec![
-                    "run".into(),
-                    "cancel".into(),
-                    run_id.to_string(),
-                    "--repo".into(),
-                    repo.into(),
-                ],
-                None,
-            ),
-            GitHubMutation::RunRerun {
-                run_id,
-                failed_only,
-            } => {
-                let mut args = vec![
-                    "run".into(),
-                    "rerun".into(),
-                    run_id.to_string(),
-                    "--repo".into(),
-                    repo.into(),
-                ];
-                if *failed_only {
-                    args.push("--failed".into());
-                }
-                (args, None)
-            }
-            GitHubMutation::WorkflowDispatch {
-                workflow,
-                r#ref,
-                inputs,
-            } => {
-                let mut args = vec![
-                    "workflow".into(),
-                    "run".into(),
-                    workflow.clone(),
-                    "--repo".into(),
-                    repo.into(),
-                    "--ref".into(),
-                    r#ref.clone(),
-                ];
-                for (key, value) in inputs {
-                    args.push("-f".into());
-                    args.push(format!("{key}={value}"));
-                }
-                (args, None)
-            }
-        };
+        let (args, input) = issue_mutation_args(repo, mutation)
+            .or_else(|| pull_mutation_args(repo, mutation))
+            .unwrap_or_else(|| run_mutation_args(repo, mutation));
         let output = self.output_with_input(&args, input)?;
         Ok(String::from_utf8_lossy(&output).trim().to_string())
     }

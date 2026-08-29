@@ -32,7 +32,99 @@ pub struct WorkflowInput {
     pub options: Vec<String>,
 }
 
+fn parse_options_list(lines: &[&str], i: &mut usize, options_indent: usize) -> Vec<String> {
+    let mut options = Vec::new();
+    while *i < lines.len() {
+        let line = lines[*i];
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('#') {
+            *i += 1;
+            continue;
+        }
+        if indent_of(line) <= options_indent {
+            break;
+        }
+        if let Some(item) = t.strip_prefix('-') {
+            options.push(unquote(item.trim()));
+        }
+        *i += 1;
+    }
+    options
+}
+
+fn parse_single_input(
+    lines: &[&str],
+    i: &mut usize,
+    name: &str,
+    field_indent: usize,
+) -> WorkflowInput {
+    let mut input = WorkflowInput {
+        name: name.to_string(),
+        description: String::new(),
+        required: false,
+        input_type: "string".into(),
+        default: String::new(),
+        options: Vec::new(),
+    };
+    *i += 1;
+    while *i < lines.len() {
+        let line = lines[*i];
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('#') {
+            *i += 1;
+            continue;
+        }
+        let ind = indent_of(line);
+        if ind <= field_indent {
+            break;
+        }
+        if let Some(value) = t.strip_prefix("description:") {
+            input.description = unquote(value.trim());
+        } else if let Some(value) = t.strip_prefix("type:") {
+            input.input_type = unquote(value.trim());
+        } else if let Some(value) = t.strip_prefix("required:") {
+            input.required = matches!(value.trim().to_ascii_lowercase().as_str(), "true" | "yes");
+        } else if let Some(value) = t.strip_prefix("default:") {
+            input.default = unquote(value.trim());
+        } else if t == "options:" || t.starts_with("options:") {
+            *i += 1;
+            input.options = parse_options_list(lines, i, ind);
+            continue;
+        }
+        *i += 1;
+    }
+    input
+}
+
+fn parse_inputs_block(lines: &[&str], i: &mut usize, inputs_indent: usize) -> Vec<WorkflowInput> {
+    let mut inputs = Vec::new();
+    while *i < lines.len() {
+        let line = lines[*i];
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('#') {
+            *i += 1;
+            continue;
+        }
+        let ind = indent_of(line);
+        if ind <= inputs_indent {
+            break;
+        }
+        if let Some(name) = t.strip_suffix(':').filter(|name| {
+            !name.is_empty()
+                && name
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+        }) {
+            inputs.push(parse_single_input(lines, i, name, ind));
+            continue;
+        }
+        *i += 1;
+    }
+    inputs
+}
+
 /// Minimal parser for `on.workflow_dispatch` and its `inputs` block.
+#[must_use]
 pub fn parse_workflow_dispatch(yaml: &str) -> (bool, Vec<WorkflowInput>) {
     let mut has_dispatch = false;
     let mut inputs = Vec::new();
@@ -64,90 +156,13 @@ pub fn parse_workflow_dispatch(yaml: &str) -> (bool, Vec<WorkflowInput>) {
                     i += 1;
                     continue;
                 }
-                let ind = indent_of(line);
-                if ind <= base_indent {
+                if indent_of(line) <= base_indent {
                     break;
                 }
                 if t == "inputs:" || t.starts_with("inputs:") {
-                    let inputs_indent = ind;
+                    let inputs_indent = indent_of(line);
                     i += 1;
-                    while i < lines.len() {
-                        let line = lines[i];
-                        let t = line.trim();
-                        if t.is_empty() || t.starts_with('#') {
-                            i += 1;
-                            continue;
-                        }
-                        let ind = indent_of(line);
-                        if ind <= inputs_indent {
-                            break;
-                        }
-                        if let Some(name) = t.strip_suffix(':').filter(|name| {
-                            !name.is_empty()
-                                && name
-                                    .chars()
-                                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
-                        }) {
-                            let field_indent = ind;
-                            let mut input = WorkflowInput {
-                                name: name.to_string(),
-                                description: String::new(),
-                                required: false,
-                                input_type: "string".into(),
-                                default: String::new(),
-                                options: Vec::new(),
-                            };
-                            i += 1;
-                            while i < lines.len() {
-                                let line = lines[i];
-                                let t = line.trim();
-                                if t.is_empty() || t.starts_with('#') {
-                                    i += 1;
-                                    continue;
-                                }
-                                let ind = indent_of(line);
-                                if ind <= field_indent {
-                                    break;
-                                }
-                                if let Some(value) = t.strip_prefix("description:") {
-                                    input.description = unquote(value.trim());
-                                } else if let Some(value) = t.strip_prefix("type:") {
-                                    input.input_type = unquote(value.trim());
-                                } else if let Some(value) = t.strip_prefix("required:") {
-                                    input.required = matches!(
-                                        value.trim().to_ascii_lowercase().as_str(),
-                                        "true" | "yes"
-                                    );
-                                } else if let Some(value) = t.strip_prefix("default:") {
-                                    input.default = unquote(value.trim());
-                                } else if t == "options:" || t.starts_with("options:") {
-                                    let options_indent = ind;
-                                    i += 1;
-                                    while i < lines.len() {
-                                        let line = lines[i];
-                                        let t = line.trim();
-                                        if t.is_empty() || t.starts_with('#') {
-                                            i += 1;
-                                            continue;
-                                        }
-                                        let ind = indent_of(line);
-                                        if ind <= options_indent {
-                                            break;
-                                        }
-                                        if let Some(item) = t.strip_prefix('-') {
-                                            input.options.push(unquote(item.trim()));
-                                        }
-                                        i += 1;
-                                    }
-                                    continue;
-                                }
-                                i += 1;
-                            }
-                            inputs.push(input);
-                            continue;
-                        }
-                        i += 1;
-                    }
+                    inputs = parse_inputs_block(&lines, &mut i, inputs_indent);
                     continue;
                 }
                 i += 1;

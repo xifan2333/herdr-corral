@@ -10,6 +10,7 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 pub const ACTIVITY_HEIGHT: u16 = 3;
 
 /// Split the sidebar body into: activity strip | feature content.
+#[must_use]
 pub fn split_sidebar(area: Rect) -> (Rect, Rect) {
     let rows = Layout::default()
         .direction(Direction::Vertical)

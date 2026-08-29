@@ -17,6 +17,7 @@ pub const SIDEBAR_LABEL: &str = "Corral";
 ///
 /// Returns `true` only when the CLI exited successfully. Missing bin/id or a
 /// failed spawn/non-zero status → `false` (caller must not assume the label stuck).
+#[must_use]
 pub fn set_pane_label(herdr_bin: Option<&Path>, pane_id: Option<&str>, label: &str) -> bool {
     let (Some(bin), Some(id)) = (herdr_bin, pane_id) else {
         return false;
@@ -30,20 +31,19 @@ pub fn set_pane_label(herdr_bin: Option<&Path>, pane_id: Option<&str>, label: &s
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .is_ok_and(|s| s.success())
 }
 
 /// Stamp stable sidebar identity plus a timestamp heartbeat. The token is
 /// independent of the cosmetic/activity state and expires host-side after 20s.
+#[must_use]
 pub fn report_sidebar_heartbeat(herdr_bin: Option<&Path>, pane_id: Option<&str>) -> bool {
     let (Some(bin), Some(id)) = (herdr_bin, pane_id) else {
         return false;
     };
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_secs());
     let token = format!("{SIDEBAR_TOKEN}={now}");
     Command::new(bin)
         .args([
@@ -61,6 +61,5 @@ pub fn report_sidebar_heartbeat(herdr_bin: Option<&Path>, pane_id: Option<&str>)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+        .is_ok_and(|status| status.success())
 }

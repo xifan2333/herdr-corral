@@ -40,28 +40,23 @@ enum Section {
 }
 
 impl Section {
-    const ALL: [Section; 4] = [
-        Section::Issues,
-        Section::Pulls,
-        Section::Workflows,
-        Section::Actions,
-    ];
+    const ALL: [Self; 4] = [Self::Issues, Self::Pulls, Self::Workflows, Self::Actions];
 
-    fn index(self) -> usize {
+    const fn index(self) -> usize {
         match self {
-            Section::Issues => 0,
-            Section::Pulls => 1,
-            Section::Workflows => 2,
-            Section::Actions => 3,
+            Self::Issues => 0,
+            Self::Pulls => 1,
+            Self::Workflows => 2,
+            Self::Actions => 3,
         }
     }
 
-    fn title(self) -> &'static str {
+    const fn title(self) -> &'static str {
         match self {
-            Section::Issues => "ISSUES",
-            Section::Pulls => "PULL REQUESTS",
-            Section::Workflows => "WORKFLOWS",
-            Section::Actions => "ACTIONS",
+            Self::Issues => "ISSUES",
+            Self::Pulls => "PULL REQUESTS",
+            Self::Workflows => "WORKFLOWS",
+            Self::Actions => "ACTIONS",
         }
     }
 }
@@ -74,7 +69,7 @@ struct Collection<T> {
 }
 
 impl<T> Collection<T> {
-    fn new(limit: usize) -> Self {
+    const fn new(limit: usize) -> Self {
         Self {
             items: Vec::new(),
             limit,
@@ -103,18 +98,18 @@ enum Row {
 }
 
 impl Row {
-    fn section(&self) -> Section {
+    const fn section(&self) -> Section {
         match self {
-            Row::Header { section, .. } | Row::Status { section, .. } => *section,
-            Row::Issue(_) => Section::Issues,
-            Row::Pull(_) => Section::Pulls,
-            Row::Workflow(_) => Section::Workflows,
-            Row::Run(_) => Section::Actions,
+            Self::Header { section, .. } | Self::Status { section, .. } => *section,
+            Self::Issue(_) => Section::Issues,
+            Self::Pull(_) => Section::Pulls,
+            Self::Workflow(_) => Section::Workflows,
+            Self::Run(_) => Section::Actions,
         }
     }
 
-    fn selectable(&self) -> bool {
-        !matches!(self, Row::Status { .. })
+    const fn selectable(&self) -> bool {
+        !matches!(self, Self::Status { .. })
     }
 }
 
@@ -264,15 +259,15 @@ impl GitHubView {
         view
     }
 
-    fn issue_state(&self) -> &'static str {
+    const fn issue_state(&self) -> &'static str {
         ["open", "closed", "all"][self.issue_state]
     }
 
-    fn pr_state(&self) -> &'static str {
+    const fn pr_state(&self) -> &'static str {
         ["open", "closed", "merged", "all"][self.pr_state]
     }
 
-    fn section_state(&self, section: Section) -> &'static str {
+    const fn section_state(&self, section: Section) -> &'static str {
         match section {
             Section::Issues => self.issue_state(),
             Section::Pulls => self.pr_state(),
@@ -342,8 +337,7 @@ impl GitHubView {
                 self.workflows.loading = true;
                 self.workflows.error = None;
                 let adapter = Arc::clone(&adapter);
-                let repo = repo.clone();
-                let sender = sender.clone();
+                let sender = sender;
                 std::thread::spawn(move || {
                     let result = adapter.workflows(&repo).map(Payload::Workflows);
                     let _ = sender.send(Completion {
@@ -359,8 +353,7 @@ impl GitHubView {
                 let limit = self.runs.limit;
                 self.last_runs_refresh = Instant::now();
                 let adapter = Arc::clone(&adapter);
-                let repo = repo.clone();
-                let sender = sender.clone();
+                let sender = sender;
                 std::thread::spawn(move || {
                     let result = adapter.runs(&repo, limit).map(Payload::Runs);
                     let _ = sender.send(Completion {
@@ -383,13 +376,45 @@ impl GitHubView {
         }
     }
 
-    fn apply_completion(&mut self, completion: Completion) {
-        if completion.generation != self.generation {
+    fn apply_workflow_yaml(&mut self, workflow: String, r#ref: String, yaml: &str) {
+        self.dispatching = false;
+        let (has_dispatch, inputs) = parse_workflow_dispatch(yaml);
+        if !has_dispatch {
+            self.set_notice("workflow has no workflow_dispatch trigger", true);
             return;
         }
-        let selected = self.selected_key();
-        match completion.result {
-            Ok(Payload::Repository(repo)) => {
+        if inputs.is_empty() {
+            self.dispatch_mode = Some(DispatchMode::Confirm(PendingDispatch {
+                workflow,
+                r#ref,
+                inputs: Vec::new(),
+            }));
+            return;
+        }
+        let fields: Vec<DispatchField> = inputs
+            .into_iter()
+            .map(|input| DispatchField {
+                value: input.default.clone(),
+                input,
+            })
+            .collect();
+        let edit = fields
+            .first()
+            .map(|field| field.value.chars().collect())
+            .unwrap_or_default();
+        self.dispatch_mode = Some(DispatchMode::Form {
+            workflow,
+            r#ref,
+            fields,
+            selected: 0,
+            editing: true,
+            edit,
+        });
+    }
+
+    fn apply_payload(&mut self, payload: Payload, selected: Option<RowKey>) -> bool {
+        match payload {
+            Payload::Repository(repo) => {
                 self.repo_loading = false;
                 let changed = self
                     .repo
@@ -404,67 +429,40 @@ impl GitHubView {
                 self.repo = Some(repo);
                 self.rebuild_rows(selected);
                 self.load_expanded();
-                return;
+                true
             }
-            Ok(Payload::Issues(items)) => {
+            Payload::Issues(items) => {
                 self.issues.items = items;
                 self.issues.loading = false;
+                false
             }
-            Ok(Payload::Pulls(items)) => {
+            Payload::Pulls(items) => {
                 self.pulls.items = items;
                 self.pulls.loading = false;
+                false
             }
-            Ok(Payload::Runs(items)) => {
+            Payload::Runs(items) => {
                 self.runs.items = items;
                 self.runs.loading = false;
+                false
             }
-            Ok(Payload::Workflows(items)) => {
+            Payload::Workflows(items) => {
                 self.workflows.items = items
                     .into_iter()
                     .filter(|workflow| workflow.state.eq_ignore_ascii_case("active"))
                     .collect();
                 self.workflows.loading = false;
+                false
             }
-            Ok(Payload::WorkflowYaml {
+            Payload::WorkflowYaml {
                 workflow,
                 r#ref,
                 yaml,
-            }) => {
-                self.dispatching = false;
-                let (has_dispatch, inputs) = parse_workflow_dispatch(&yaml);
-                if !has_dispatch {
-                    self.set_notice("workflow has no workflow_dispatch trigger", true);
-                } else if inputs.is_empty() {
-                    self.dispatch_mode = Some(DispatchMode::Confirm(PendingDispatch {
-                        workflow,
-                        r#ref,
-                        inputs: Vec::new(),
-                    }));
-                } else {
-                    let fields: Vec<DispatchField> = inputs
-                        .into_iter()
-                        .map(|input| DispatchField {
-                            value: input.default.clone(),
-                            input,
-                        })
-                        .collect();
-                    // Start typing the first parameter immediately so the footer
-                    // can stay as a compact `key=` line without extra chrome.
-                    let edit = fields
-                        .first()
-                        .map(|field| field.value.chars().collect())
-                        .unwrap_or_default();
-                    self.dispatch_mode = Some(DispatchMode::Form {
-                        workflow,
-                        r#ref,
-                        fields,
-                        selected: 0,
-                        editing: true,
-                        edit,
-                    });
-                }
+            } => {
+                self.apply_workflow_yaml(workflow, r#ref, &yaml);
+                false
             }
-            Ok(Payload::Dispatch(message)) => {
+            Payload::Dispatch(message) => {
                 self.dispatching = false;
                 self.dispatch_mode = None;
                 self.set_notice(
@@ -475,37 +473,56 @@ impl GitHubView {
                     },
                     false,
                 );
-                // Fresh runs usually take a moment to appear.
                 self.start_load(Section::Actions);
+                false
             }
-            Err(error) => match completion.target {
-                LoadTarget::Repository => {
-                    self.repo_loading = false;
-                    self.repo_error = Some(error);
-                }
-                LoadTarget::Issues => {
-                    self.issues.loading = false;
-                    self.issues.error = Some(error);
-                }
-                LoadTarget::Pulls => {
-                    self.pulls.loading = false;
-                    self.pulls.error = Some(error);
-                }
-                LoadTarget::Runs => {
-                    self.runs.loading = false;
-                    self.runs.error = Some(error);
-                }
-                LoadTarget::Workflows => {
-                    self.workflows.loading = false;
-                    self.workflows.error = Some(error);
-                }
-                LoadTarget::WorkflowYaml | LoadTarget::Dispatch => {
-                    self.dispatching = false;
-                    self.set_notice(error, true);
-                }
-            },
         }
-        self.rebuild_rows(selected);
+    }
+
+    fn apply_load_error(&mut self, target: LoadTarget, error: String) {
+        match target {
+            LoadTarget::Repository => {
+                self.repo_loading = false;
+                self.repo_error = Some(error);
+            }
+            LoadTarget::Issues => {
+                self.issues.loading = false;
+                self.issues.error = Some(error);
+            }
+            LoadTarget::Pulls => {
+                self.pulls.loading = false;
+                self.pulls.error = Some(error);
+            }
+            LoadTarget::Runs => {
+                self.runs.loading = false;
+                self.runs.error = Some(error);
+            }
+            LoadTarget::Workflows => {
+                self.workflows.loading = false;
+                self.workflows.error = Some(error);
+            }
+            LoadTarget::WorkflowYaml | LoadTarget::Dispatch => {
+                self.dispatching = false;
+                self.set_notice(error, true);
+            }
+        }
+    }
+
+    fn apply_completion(&mut self, completion: Completion) {
+        if completion.generation != self.generation {
+            return;
+        }
+        let selected = self.selected_key();
+        let already_rebuilt = match completion.result {
+            Ok(payload) => self.apply_payload(payload, selected),
+            Err(error) => {
+                self.apply_load_error(completion.target, error);
+                false
+            }
+        };
+        if !already_rebuilt {
+            self.rebuild_rows(selected);
+        }
     }
 
     fn issue_indices(&self) -> Vec<usize> {
@@ -591,7 +608,7 @@ impl GitHubView {
         }
     }
 
-    fn section_loading(&self, section: Section) -> bool {
+    const fn section_loading(&self, section: Section) -> bool {
         match section {
             Section::Issues => self.issues.loading,
             Section::Pulls => self.pulls.loading,
@@ -609,7 +626,7 @@ impl GitHubView {
         }
     }
 
-    fn section_empty(&self, section: Section) -> bool {
+    const fn section_empty(&self, section: Section) -> bool {
         match section {
             Section::Issues => self.issues.items.is_empty(),
             Section::Pulls => self.pulls.items.is_empty(),
@@ -1026,8 +1043,7 @@ impl GitHubView {
                         if required_empty {
                             let name = fields
                                 .get(*selected)
-                                .map(|field| field.input.name.clone())
-                                .unwrap_or_else(|| "input".into());
+                                .map_or_else(|| "input".into(), |field| field.input.name.clone());
                             self.set_notice(format!("{name} is required"), true);
                             return KeyOutcome::Handled;
                         }
@@ -1164,11 +1180,8 @@ impl GitHubView {
         }
     }
 
-    fn dispatch_action(&mut self, action: &str) -> KeyOutcome {
-        if self.dispatch_mode.is_some() {
-            return KeyOutcome::Handled;
-        }
-        match action {
+    fn dispatch_navigation(&mut self, action: &str) -> Option<KeyOutcome> {
+        let outcome = match action {
             config::internal::UP => {
                 self.move_selection(-1);
                 KeyOutcome::Handled
@@ -1187,14 +1200,13 @@ impl GitHubView {
                 self.ensure_visible();
                 KeyOutcome::Handled
             }
-            config::internal::PAGE_UP => {
+            config::internal::PAGE_UP | config::internal::PAGE_DOWN => {
                 let page = isize::try_from(self.body_height.get().max(2) - 1).unwrap_or(1);
-                self.move_selection(-page);
-                KeyOutcome::Handled
-            }
-            config::internal::PAGE_DOWN => {
-                let page = isize::try_from(self.body_height.get().max(2) - 1).unwrap_or(1);
-                self.move_selection(page);
+                self.move_selection(if action == config::internal::PAGE_UP {
+                    -page
+                } else {
+                    page
+                });
                 KeyOutcome::Handled
             }
             config::internal::TOGGLE | config::internal::OPEN | config::internal::GITHUB_VIEW => {
@@ -1207,36 +1219,44 @@ impl GitHubView {
                 self.refresh_selected();
                 KeyOutcome::Handled
             }
-            config::internal::GITHUB_ISSUES => {
-                self.focus_section(Section::Issues);
-                KeyOutcome::Handled
-            }
-            config::internal::GITHUB_PULLS => {
-                self.focus_section(Section::Pulls);
-                KeyOutcome::Handled
-            }
-            config::internal::GITHUB_ACTIONS => {
-                self.focus_section(Section::Actions);
-                KeyOutcome::Handled
-            }
-            config::internal::GITHUB_WORKFLOWS => {
-                self.focus_section(Section::Workflows);
-                KeyOutcome::Handled
-            }
+            _ => return None,
+        };
+        Some(outcome)
+    }
+
+    fn dispatch_section_navigation(&mut self, action: &str) -> Option<KeyOutcome> {
+        let section = match action {
+            config::internal::GITHUB_ISSUES => Section::Issues,
+            config::internal::GITHUB_PULLS => Section::Pulls,
+            config::internal::GITHUB_ACTIONS => Section::Actions,
+            config::internal::GITHUB_WORKFLOWS => Section::Workflows,
             config::internal::GITHUB_NEXT_SECTION => {
-                let next = self.selected_section().map_or(Section::Issues, |section| {
-                    Section::ALL[(section.index() + 1) % Section::ALL.len()]
-                });
-                self.focus_section(next);
-                KeyOutcome::Handled
+                self.selected_section().map_or(Section::Issues, |current| {
+                    Section::ALL[(current.index() + 1) % Section::ALL.len()]
+                })
             }
             config::internal::GITHUB_PREV_SECTION => {
-                let previous = self.selected_section().map_or(Section::Actions, |section| {
-                    Section::ALL[(section.index() + Section::ALL.len() - 1) % Section::ALL.len()]
-                });
-                self.focus_section(previous);
-                KeyOutcome::Handled
+                self.selected_section().map_or(Section::Actions, |current| {
+                    Section::ALL[(current.index() + Section::ALL.len() - 1) % Section::ALL.len()]
+                })
             }
+            _ => return None,
+        };
+        self.focus_section(section);
+        Some(KeyOutcome::Handled)
+    }
+
+    fn dispatch_action(&mut self, action: &str) -> KeyOutcome {
+        if self.dispatch_mode.is_some() {
+            return KeyOutcome::Handled;
+        }
+        if let Some(outcome) = self.dispatch_navigation(action) {
+            return outcome;
+        }
+        if let Some(outcome) = self.dispatch_section_navigation(action) {
+            return outcome;
+        }
+        match action {
             config::internal::GITHUB_DIFF if matches!(self.selected_row(), Some(Row::Pull(_))) => {
                 self.preview("diff")
             }
@@ -1317,22 +1337,16 @@ impl GitHubView {
             .iter()
             .position(|candidate| *candidate == line)
     }
-}
 
-impl FeatureView for GitHubView {
-    fn draw(&self, frame: &mut Frame, area: Rect, palette: &Palette) {
-        if area.height == 0 {
-            return;
-        }
-        let repo_name = self
-            .repo
-            .as_ref()
-            .map(|repo| repo.name_with_owner.as_str())
-            .unwrap_or(if self.repo_loading {
+    fn draw_repo_header(&self, frame: &mut Frame, area: Rect, palette: &Palette) {
+        let repo_name = self.repo.as_ref().map_or(
+            if self.repo_loading {
                 "connecting…"
             } else {
                 "GitHub"
-            });
+            },
+            |repo| repo.name_with_owner.as_str(),
+        );
         frame.render_widget(
             Paragraph::new(format!(" {repo_name}")).style(
                 Style::default()
@@ -1341,6 +1355,223 @@ impl FeatureView for GitHubView {
             ),
             Rect { height: 1, ..area },
         );
+    }
+
+    fn draw_body_row(
+        &self,
+        frame: &mut Frame,
+        row: &Row,
+        rect: Rect,
+        selected: bool,
+        palette: &Palette,
+    ) {
+        let background = if selected {
+            palette.surface0
+        } else {
+            Color::Reset
+        };
+        match row {
+            Row::Header {
+                section,
+                count,
+                collapsed,
+            } => draw_header(
+                frame, rect, *section, *count, *collapsed, background, palette,
+            ),
+            Row::Issue(index) => {
+                if let Some(issue) = self.issues.items.get(*index) {
+                    frame.render_widget(
+                        Paragraph::new(issue_line(issue, palette))
+                            .style(Style::default().bg(background)),
+                        rect,
+                    );
+                }
+            }
+            Row::Pull(index) => {
+                if let Some(pull) = self.pulls.items.get(*index) {
+                    frame.render_widget(
+                        Paragraph::new(pull_line(pull, palette))
+                            .style(Style::default().bg(background)),
+                        rect,
+                    );
+                }
+            }
+            Row::Run(index) => {
+                if let Some(run) = self.runs.items.get(*index) {
+                    frame.render_widget(
+                        Paragraph::new(run_line(run, palette))
+                            .style(Style::default().bg(background)),
+                        rect,
+                    );
+                }
+            }
+            Row::Workflow(index) => {
+                if let Some(workflow) = self.workflows.items.get(*index) {
+                    frame.render_widget(
+                        Paragraph::new(workflow_line(workflow, palette))
+                            .style(Style::default().bg(background)),
+                        rect,
+                    );
+                }
+            }
+            Row::Status { message, error, .. } => {
+                frame.render_widget(
+                    Paragraph::new(format!("   {message}")).style(Style::default().fg(if *error {
+                        palette.red
+                    } else {
+                        palette.overlay1
+                    })),
+                    rect,
+                );
+            }
+        }
+    }
+
+    fn draw_body(&self, frame: &mut Frame, body: Rect, palette: &Palette) {
+        if let Some(error) = &self.repo_error {
+            frame.render_widget(
+                Paragraph::new(format!(" ! {error}"))
+                    .style(
+                        Style::default()
+                            .fg(palette.red)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                    .wrap(ratatui::widgets::Wrap { trim: true }),
+                body,
+            );
+            return;
+        }
+        for (offset, row) in self
+            .rows
+            .iter()
+            .skip(self.scroll)
+            .take(usize::from(body.height))
+            .enumerate()
+        {
+            let absolute = self.scroll + offset;
+            let selected = self
+                .selectable
+                .get(self.selected)
+                .is_some_and(|row| *row == absolute);
+            let rect = Rect {
+                x: body.x,
+                y: body
+                    .y
+                    .saturating_add(u16::try_from(offset).unwrap_or(u16::MAX)),
+                width: body.width,
+                height: 1,
+            };
+            self.draw_body_row(frame, row, rect, selected, palette);
+        }
+    }
+
+    fn dispatch_footer(mode: &DispatchMode, palette: &Palette) -> (String, Style) {
+        match mode {
+            DispatchMode::Confirm(pending) => {
+                let extra = if pending.inputs.is_empty() {
+                    String::new()
+                } else {
+                    format!(" · {} inputs", pending.inputs.len())
+                };
+                (
+                    format!(
+                        " dispatch {} @ {}{}? y/N",
+                        pending.workflow, pending.r#ref, extra
+                    ),
+                    Style::default().fg(palette.yellow).bg(palette.surface0),
+                )
+            }
+            DispatchMode::Form {
+                fields,
+                selected,
+                edit,
+                ..
+            } => {
+                let name = fields
+                    .get(*selected)
+                    .map_or("input", |field| field.input.name.as_str());
+                let value = edit.iter().collect::<String>();
+                (
+                    format!(" {name}={value}│"),
+                    Style::default().fg(palette.text).bg(palette.surface0),
+                )
+            }
+        }
+    }
+
+    fn footer_content(&self, palette: &Palette) -> (String, Style) {
+        if let Some(edit) = &self.filter_edit {
+            return (
+                format!(
+                    " /{}: {}│",
+                    edit.section.title(),
+                    edit.chars.iter().collect::<String>()
+                ),
+                Style::default().fg(palette.text).bg(palette.surface0),
+            );
+        }
+        if let Some(mode) = &self.dispatch_mode {
+            return Self::dispatch_footer(mode, palette);
+        }
+        if self.dispatching {
+            return (" dispatching…".into(), Style::default().fg(palette.accent));
+        }
+        if let Some((message, error)) = &self.notice {
+            return (
+                format!(" {message}"),
+                Style::default().fg(if *error { palette.red } else { palette.green }),
+            );
+        }
+        if self.repo_loading {
+            return (" connecting…".into(), Style::default().fg(palette.accent));
+        }
+        if let Some(section) = Section::ALL
+            .into_iter()
+            .find(|section| self.section_loading(*section))
+        {
+            return (
+                format!(" loading {}…", section.title().to_ascii_lowercase()),
+                Style::default().fg(palette.accent),
+            );
+        }
+        if let Some(section) = self.selected_section() {
+            let filter = self.section_filter(section);
+            return (
+                format!(
+                    " {}{}",
+                    self.section_state(section),
+                    if filter.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" /{filter}")
+                    }
+                ),
+                Style::default().fg(palette.overlay1),
+            );
+        }
+        (String::new(), Style::default())
+    }
+
+    fn draw_footer(&self, frame: &mut Frame, area: Rect, palette: &Palette) {
+        let (message, style) = self.footer_content(palette);
+        frame.render_widget(
+            Paragraph::new(message).style(style),
+            Rect {
+                x: area.x,
+                y: area.y + area.height - 1,
+                width: area.width,
+                height: 1,
+            },
+        );
+    }
+}
+
+impl FeatureView for GitHubView {
+    fn draw(&self, frame: &mut Frame, area: Rect, palette: &Palette) {
+        if area.height == 0 {
+            return;
+        }
+        self.draw_repo_header(frame, area, palette);
         if area.height < 2 {
             return;
         }
@@ -1354,184 +1585,9 @@ impl FeatureView for GitHubView {
         };
         self.body_top.set(body.y);
         self.body_height.set(body.height);
-
-        if let Some(error) = &self.repo_error {
-            frame.render_widget(
-                Paragraph::new(format!(" ! {error}"))
-                    .style(
-                        Style::default()
-                            .fg(palette.red)
-                            .add_modifier(Modifier::BOLD),
-                    )
-                    .wrap(ratatui::widgets::Wrap { trim: true }),
-                body,
-            );
-        } else {
-            for (offset, row) in self
-                .rows
-                .iter()
-                .skip(self.scroll)
-                .take(usize::from(body.height))
-                .enumerate()
-            {
-                let absolute = self.scroll + offset;
-                let selected = self
-                    .selectable
-                    .get(self.selected)
-                    .is_some_and(|row| *row == absolute);
-                let rect = Rect {
-                    x: body.x,
-                    y: body.y + u16::try_from(offset).unwrap_or(0),
-                    width: body.width,
-                    height: 1,
-                };
-                let background = if selected {
-                    palette.surface0
-                } else {
-                    Color::Reset
-                };
-                match row {
-                    Row::Header {
-                        section,
-                        count,
-                        collapsed,
-                    } => draw_header(
-                        frame, rect, *section, *count, *collapsed, background, palette,
-                    ),
-                    Row::Issue(index) => {
-                        if let Some(issue) = self.issues.items.get(*index) {
-                            frame.render_widget(
-                                Paragraph::new(issue_line(issue, palette))
-                                    .style(Style::default().bg(background)),
-                                rect,
-                            );
-                        }
-                    }
-                    Row::Pull(index) => {
-                        if let Some(pull) = self.pulls.items.get(*index) {
-                            frame.render_widget(
-                                Paragraph::new(pull_line(pull, palette))
-                                    .style(Style::default().bg(background)),
-                                rect,
-                            );
-                        }
-                    }
-                    Row::Run(index) => {
-                        if let Some(run) = self.runs.items.get(*index) {
-                            frame.render_widget(
-                                Paragraph::new(run_line(run, palette))
-                                    .style(Style::default().bg(background)),
-                                rect,
-                            );
-                        }
-                    }
-                    Row::Workflow(index) => {
-                        if let Some(workflow) = self.workflows.items.get(*index) {
-                            frame.render_widget(
-                                Paragraph::new(workflow_line(workflow, palette))
-                                    .style(Style::default().bg(background)),
-                                rect,
-                            );
-                        }
-                    }
-                    Row::Status { message, error, .. } => {
-                        frame.render_widget(
-                            Paragraph::new(format!("   {message}")).style(Style::default().fg(
-                                if *error {
-                                    palette.red
-                                } else {
-                                    palette.overlay1
-                                },
-                            )),
-                            rect,
-                        );
-                    }
-                }
-            }
-        }
-
+        self.draw_body(frame, body, palette);
         if footer_height == 1 {
-            let footer = Rect {
-                x: area.x,
-                y: area.y + area.height - 1,
-                width: area.width,
-                height: 1,
-            };
-            let (message, style) = if let Some(edit) = &self.filter_edit {
-                (
-                    format!(
-                        " /{}: {}│",
-                        edit.section.title(),
-                        edit.chars.iter().collect::<String>()
-                    ),
-                    Style::default().fg(palette.text).bg(palette.surface0),
-                )
-            } else if let Some(mode) = &self.dispatch_mode {
-                match mode {
-                    DispatchMode::Confirm(pending) => {
-                        let extra = if pending.inputs.is_empty() {
-                            String::new()
-                        } else {
-                            format!(" · {} inputs", pending.inputs.len())
-                        };
-                        (
-                            format!(
-                                " dispatch {} @ {}{}? y/N",
-                                pending.workflow, pending.r#ref, extra
-                            ),
-                            Style::default().fg(palette.yellow).bg(palette.surface0),
-                        )
-                    }
-                    DispatchMode::Form {
-                        fields,
-                        selected,
-                        edit,
-                        ..
-                    } => {
-                        let field = fields.get(*selected);
-                        let name = field.map(|f| f.input.name.as_str()).unwrap_or("input");
-                        let value = edit.iter().collect::<String>();
-                        (
-                            format!(" {name}={value}│"),
-                            Style::default().fg(palette.text).bg(palette.surface0),
-                        )
-                    }
-                }
-            } else if self.dispatching {
-                (" dispatching…".into(), Style::default().fg(palette.accent))
-            } else if let Some((message, error)) = &self.notice {
-                (
-                    format!(" {message}"),
-                    Style::default().fg(if *error { palette.red } else { palette.green }),
-                )
-            } else if self.repo_loading {
-                (" connecting…".into(), Style::default().fg(palette.accent))
-            } else if let Some(section) = Section::ALL
-                .into_iter()
-                .find(|section| self.section_loading(*section))
-            {
-                (
-                    format!(" loading {}…", section.title().to_ascii_lowercase()),
-                    Style::default().fg(palette.accent),
-                )
-            } else if let Some(section) = self.selected_section() {
-                let filter = self.section_filter(section);
-                (
-                    format!(
-                        " {}{}",
-                        self.section_state(section),
-                        if filter.is_empty() {
-                            String::new()
-                        } else {
-                            format!(" /{filter}")
-                        }
-                    ),
-                    Style::default().fg(palette.overlay1),
-                )
-            } else {
-                (String::new(), Style::default())
-            };
-            frame.render_widget(Paragraph::new(message).style(style), footer);
+            self.draw_footer(frame, area, palette);
         }
     }
 
@@ -1632,7 +1688,8 @@ impl FeatureView for GitHubView {
 }
 
 fn header_columns(rect: Rect, count: usize) -> (Rect, Rect) {
-    let badge_width = ((count.max(1).ilog10() + 1) as u16 + 2).min(rect.width);
+    let digits = u16::try_from(count.max(1).ilog10() + 1).unwrap_or(u16::MAX);
+    let badge_width = digits.saturating_add(2).min(rect.width);
     let title = Rect {
         width: rect.width.saturating_sub(badge_width),
         ..rect

@@ -103,6 +103,7 @@ pub struct Config {
 }
 
 impl Config {
+    #[must_use]
     pub fn load() -> Self {
         let dir = config_dir();
         let path = dir.join("config.sh");
@@ -176,6 +177,7 @@ impl Config {
             .map(String::as_str)
     }
 
+    #[must_use]
     pub fn is_internal(action: &str) -> bool {
         matches!(
             action,
@@ -250,6 +252,7 @@ impl Config {
     ///
     /// The action may print `CORRAL_SUSPEND=0|1` on stdout to tell the TUI
     /// whether to leave the alternate screen (standalone editors need 1).
+    #[must_use]
     pub fn run_shell(
         &self,
         action: &str,
@@ -302,8 +305,7 @@ impl Config {
                 .stdout(Stdio::inherit())
                 .stderr(Stdio::inherit())
                 .status()
-                .map(|s| s.success())
-                .unwrap_or(false);
+                .is_ok_and(|s| s.success());
             return ShellResult { ok, suspend: true };
         }
 
@@ -334,6 +336,11 @@ impl Config {
     /// The action receives the same Corral environment as `run_shell`, but no
     /// TTY. Diagnostics come from stderr and the caller decides how to display
     /// or parse the captured text.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`Err`] containing a message if the action name is invalid or
+    /// if process execution fails.
     pub fn run_shell_capture(
         &self,
         action: &str,
@@ -453,9 +460,7 @@ fn collect_binds(source: &str) -> HashMap<String, String> {
     if source.trim().is_empty() {
         return binds;
     }
-    let Ok(tmp) = tempfile_path("corral-binds") else {
-        return binds;
-    };
+    let tmp = tempfile_path("corral-binds");
 
     let status = Command::new("bash")
         .arg("-c")
@@ -468,7 +473,7 @@ fn collect_binds(source: &str) -> HashMap<String, String> {
         .stderr(Stdio::null())
         .status();
 
-    if status.map(|s| s.success()).unwrap_or(false) || tmp.exists() {
+    if status.is_ok_and(|s| s.success()) || tmp.exists() {
         if let Ok(text) = std::fs::read_to_string(&tmp) {
             for line in text.lines() {
                 let mut it = line.splitn(2, '\t');
@@ -491,6 +496,10 @@ fn collect_binds(source: &str) -> HashMap<String, String> {
 /// Records the binding only in register mode (`CORRAL_REGISTER=1` +
 /// `CORRAL_BINDS_FILE`). Otherwise it is a harmless no-op, so the same call in
 /// a sourced action run does nothing.
+///
+/// # Errors
+///
+/// Returns an [`std::io::Error`] if binding recording fails.
 pub fn cli_bind(args: &[String]) -> std::io::Result<()> {
     if std::env::var("CORRAL_REGISTER").ok().as_deref() != Some("1") {
         return Ok(());
@@ -542,14 +551,13 @@ fn path_with_exe_dir() -> String {
 }
 
 /// A unique temp file path under the system temp dir.
-fn tempfile_path(prefix: &str) -> std::io::Result<PathBuf> {
+fn tempfile_path(prefix: &str) -> PathBuf {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_nanos());
     let pid = std::process::id();
-    Ok(std::env::temp_dir().join(format!("{prefix}-{pid}-{nanos}")))
+    std::env::temp_dir().join(format!("{prefix}-{pid}-{nanos}"))
 }
 
 /// Minimal navigation binds when no config file is found at all (no `open`).
@@ -681,11 +689,15 @@ fn shipped_default() -> Option<PathBuf> {
 
 /// Map a crossterm key chord to the token used in `bind` lines.
 /// Character case is preserved (`g` ≠ `G`); named keys are lowercase.
+#[must_use]
 pub fn key_token(
     code: crossterm::event::KeyCode,
     mods: crossterm::event::KeyModifiers,
 ) -> Option<String> {
-    use crossterm::event::KeyCode::*;
+    use crossterm::event::KeyCode::{
+        BackTab, Backspace, Char, Delete, Down, End, Enter, Esc, Home, Left, PageDown, PageUp,
+        Right, Tab, Up,
+    };
     use crossterm::event::KeyModifiers;
 
     let base = match code {

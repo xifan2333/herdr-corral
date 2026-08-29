@@ -13,19 +13,19 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-pub(crate) const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 const IMAGE_FETCH_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// One image discovered while rendering markdown, keyed by its final line index.
 /// Click / `o` opens the URL with the external viewer (imv by default).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ImagePlacement {
+pub struct ImagePlacement {
     pub(crate) line: usize,
     pub(crate) url: String,
     pub(crate) alt: String,
 }
 
-pub(crate) fn image_viewer() -> String {
+pub fn image_viewer() -> String {
     std::env::var("CORRAL_GITHUB_IMAGE_VIEWER")
         .ok()
         .map(|value| value.trim().to_string())
@@ -37,7 +37,7 @@ pub(crate) fn image_viewer() -> String {
 /// external viewer (default: imv). Network I/O runs off the UI thread via
 /// `DetailApp::open_image`; this helper still uses an explicit ureq timeout so
 /// a hung CDN cannot stall the worker forever.
-pub(crate) fn open_image_externally(url: &str, _alt: &str) -> Result<String, String> {
+pub fn open_image_externally(url: &str, _alt: &str) -> Result<String, String> {
     let path = cache_image(url)?;
     let viewer = image_viewer();
     let mut child = Command::new(&viewer)
@@ -54,7 +54,7 @@ pub(crate) fn open_image_externally(url: &str, _alt: &str) -> Result<String, Str
     Ok(format!("opened in {viewer}"))
 }
 
-pub(crate) fn cache_image(url: &str) -> Result<PathBuf, String> {
+pub fn cache_image(url: &str) -> Result<PathBuf, String> {
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return Err("unsupported image url".into());
     }
@@ -86,7 +86,10 @@ pub(crate) fn cache_image(url: &str) -> Result<PathBuf, String> {
         .unwrap_or("")
         .to_string();
     let mut bytes = Vec::new();
-    let mut reader = response.body_mut().as_reader().take((MAX_IMAGE_BYTES as u64) + 1);
+    let mut reader = response
+        .body_mut()
+        .as_reader()
+        .take((MAX_IMAGE_BYTES as u64) + 1);
     reader
         .read_to_end(&mut bytes)
         .map_err(|error| error.to_string())?;
@@ -113,7 +116,7 @@ pub(crate) fn cache_image(url: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-pub(crate) fn image_cache_dir() -> Result<PathBuf, String> {
+pub fn image_cache_dir() -> Result<PathBuf, String> {
     let base = std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
@@ -123,7 +126,7 @@ pub(crate) fn image_cache_dir() -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-pub(crate) fn stable_url_digest(url: &str) -> u64 {
+pub fn stable_url_digest(url: &str) -> u64 {
     // DefaultHasher is process-stable enough for a local cache key; we only
     // need collisions to be rare within one machine's cache dir.
     let mut hasher = DefaultHasher::new();
@@ -131,7 +134,7 @@ pub(crate) fn stable_url_digest(url: &str) -> u64 {
     hasher.finish()
 }
 
-pub(crate) fn find_cached_image(dir: &Path, digest: u64) -> Option<PathBuf> {
+pub fn find_cached_image(dir: &Path, digest: u64) -> Option<PathBuf> {
     let prefix = format!("{digest:016x}");
     let exact = dir.join(&prefix);
     if exact.is_file() {
@@ -147,7 +150,7 @@ pub(crate) fn find_cached_image(dir: &Path, digest: u64) -> Option<PathBuf> {
     None
 }
 
-pub(crate) fn extension_from_url(url: &str) -> Option<&'static str> {
+pub fn extension_from_url(url: &str) -> Option<&'static str> {
     let path = url.split('?').next().unwrap_or(url);
     let ext = Path::new(path).extension()?.to_str()?.to_ascii_lowercase();
     match ext.as_str() {
@@ -161,8 +164,13 @@ pub(crate) fn extension_from_url(url: &str) -> Option<&'static str> {
     }
 }
 
-pub(crate) fn extension_from_content_type(content_type: &str) -> Option<&'static str> {
-    let mime = content_type.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+pub fn extension_from_content_type(content_type: &str) -> Option<&'static str> {
+    let mime = content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
     match mime.as_str() {
         "image/png" => Some("png"),
         "image/jpeg" | "image/jpg" => Some("jpg"),
@@ -174,7 +182,7 @@ pub(crate) fn extension_from_content_type(content_type: &str) -> Option<&'static
     }
 }
 
-pub(crate) fn extension_from_magic(bytes: &[u8]) -> Option<&'static str> {
+pub fn extension_from_magic(bytes: &[u8]) -> Option<&'static str> {
     if bytes.starts_with(&[0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n']) {
         Some("png")
     } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
@@ -189,11 +197,11 @@ pub(crate) fn extension_from_magic(bytes: &[u8]) -> Option<&'static str> {
 }
 
 /// Pull `src` / `alt` from a raw HTML `<img ...>` snippet (GitHub comments).
-pub(crate) fn extract_html_img(html: &str) -> Option<(String, String)> {
+pub fn extract_html_img(html: &str) -> Option<(String, String)> {
     let lower = html.to_ascii_lowercase();
     let start = lower.find("<img")?;
     let rest = &html[start..];
-    let end = rest.find('>').map(|index| index + 1).unwrap_or(rest.len());
+    let end = rest.find('>').map_or(rest.len(), |index| index + 1);
     let tag = &rest[..end];
     let src = html_attr(tag, "src")?;
     if !(src.starts_with("http://") || src.starts_with("https://")) {
@@ -203,7 +211,7 @@ pub(crate) fn extract_html_img(html: &str) -> Option<(String, String)> {
     Some((src, alt))
 }
 
-pub(crate) fn html_attr(tag: &str, name: &str) -> Option<String> {
+pub fn html_attr(tag: &str, name: &str) -> Option<String> {
     let lower = tag.to_ascii_lowercase();
     let key = format!("{name}=");
     let index = lower.find(&key)?;
@@ -221,7 +229,7 @@ pub(crate) fn html_attr(tag: &str, name: &str) -> Option<String> {
     Some(value[..end].to_string())
 }
 
-pub(crate) fn looks_like_image_url(url: &str) -> bool {
+pub fn looks_like_image_url(url: &str) -> bool {
     let lower = url.to_ascii_lowercase();
     if !(lower.starts_with("http://") || lower.starts_with("https://")) {
         return false;
@@ -240,7 +248,7 @@ pub(crate) fn looks_like_image_url(url: &str) -> bool {
 
 /// If `segs` is only a bare image URL (optionally surrounded by whitespace),
 /// consume it and return the URL.
-pub(crate) fn take_lone_image_url(segs: &mut Vec<(String, Style)>) -> Option<String> {
+pub fn take_lone_image_url(segs: &mut Vec<(String, Style)>) -> Option<String> {
     let text: String = segs.iter().map(|(text, _)| text.as_str()).collect();
     let trimmed = text.trim();
     if trimmed.is_empty() || trimmed.chars().any(char::is_whitespace) {
@@ -253,7 +261,7 @@ pub(crate) fn take_lone_image_url(segs: &mut Vec<(String, Style)>) -> Option<Str
     Some(trimmed.to_string())
 }
 
-pub(crate) fn push_image_link(
+pub fn push_image_link(
     out: &mut Vec<Line<'static>>,
     images: &mut Vec<(usize, String, String)>,
     url: String,
@@ -265,7 +273,7 @@ pub(crate) fn push_image_link(
     } else {
         alt.trim()
     };
-    images.push((out.len(), url.clone(), label.to_string()));
+    images.push((out.len(), url, label.to_string()));
     out.push(Line::from(vec![
         Span::styled(
             "[image] ".to_string(),

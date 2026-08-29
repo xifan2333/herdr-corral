@@ -57,7 +57,7 @@ fn clean_suggestion(output: &str) -> Result<String, String> {
     Ok(message.to_string())
 }
 
-fn diff_action(staged: bool, letter: char) -> &'static str {
+const fn diff_action(staged: bool, letter: char) -> &'static str {
     if staged {
         "diff_staged"
     } else if letter == 'U' {
@@ -84,7 +84,8 @@ fn status_columns(rect: Rect) -> (Rect, Rect) {
 }
 
 fn header_columns(rect: Rect, count: usize) -> (Rect, Rect) {
-    let badge_width = ((count.max(1).ilog10() + 1) as u16 + 2).min(rect.width);
+    let digits = u16::try_from(count.max(1).ilog10() + 1).unwrap_or(u16::MAX);
+    let badge_width = digits.saturating_add(2).min(rect.width);
     let title = Rect {
         width: rect.width.saturating_sub(badge_width),
         ..rect
@@ -218,40 +219,40 @@ enum Drawer {
 }
 
 impl Drawer {
-    const ALL: [Drawer; 8] = [
-        Drawer::Graph,
-        Drawer::Commits,
-        Drawer::FileHistory,
-        Drawer::Branches,
-        Drawer::Worktrees,
-        Drawer::Remotes,
-        Drawer::Stashes,
-        Drawer::Tags,
+    const ALL: [Self; 8] = [
+        Self::Graph,
+        Self::Commits,
+        Self::FileHistory,
+        Self::Branches,
+        Self::Worktrees,
+        Self::Remotes,
+        Self::Stashes,
+        Self::Tags,
     ];
 
-    fn title(self) -> &'static str {
+    const fn title(self) -> &'static str {
         match self {
-            Drawer::Graph => "Graph",
-            Drawer::Commits => "Commits",
-            Drawer::FileHistory => "File History",
-            Drawer::Branches => "Branches",
-            Drawer::Worktrees => "Worktrees",
-            Drawer::Remotes => "Remotes",
-            Drawer::Stashes => "Stashes",
-            Drawer::Tags => "Tags",
+            Self::Graph => "Graph",
+            Self::Commits => "Commits",
+            Self::FileHistory => "File History",
+            Self::Branches => "Branches",
+            Self::Worktrees => "Worktrees",
+            Self::Remotes => "Remotes",
+            Self::Stashes => "Stashes",
+            Self::Tags => "Tags",
         }
     }
 
-    fn index(self) -> usize {
+    const fn index(self) -> usize {
         match self {
-            Drawer::Graph => 0,
-            Drawer::Commits => 1,
-            Drawer::FileHistory => 2,
-            Drawer::Branches => 3,
-            Drawer::Worktrees => 4,
-            Drawer::Remotes => 5,
-            Drawer::Stashes => 6,
-            Drawer::Tags => 7,
+            Self::Graph => 0,
+            Self::Commits => 1,
+            Self::FileHistory => 2,
+            Self::Branches => 3,
+            Self::Worktrees => 4,
+            Self::Remotes => 5,
+            Self::Stashes => 6,
+            Self::Tags => 7,
         }
     }
 }
@@ -284,6 +285,13 @@ enum Row {
     },
 }
 
+#[derive(Default)]
+struct ScmSectionState {
+    staged_collapsed: bool,
+    changes_collapsed: bool,
+    drawer_expanded: [bool; 8],
+}
+
 pub struct ScmView {
     cwd: PathBuf,
     git: Option<Git>,
@@ -300,9 +308,7 @@ pub struct ScmView {
     error: Option<String>,
     flash: Option<(String, bool)>,
     flash_at: Option<Instant>,
-    staged_collapsed: bool,
-    changes_collapsed: bool,
-    drawer_expanded: [bool; 8],
+    sections: ScmSectionState,
     drawer_lines: [Vec<DrawerItem>; 8],
     last_file_path: Option<String>,
     message: Vec<char>,
@@ -334,9 +340,7 @@ impl ScmView {
             error: None,
             flash: None,
             flash_at: None,
-            staged_collapsed: false,
-            changes_collapsed: false,
-            drawer_expanded: [false; 8],
+            sections: ScmSectionState::default(),
             drawer_lines: std::array::from_fn(|_| Vec::new()),
             last_file_path: None,
             message: Vec::new(),
@@ -406,7 +410,7 @@ impl ScmView {
             self.status = Status::default();
         }
         for drawer in Drawer::ALL {
-            if self.drawer_expanded[drawer.index()] {
+            if self.sections.drawer_expanded[drawer.index()] {
                 self.load_drawer(drawer);
             }
         }
@@ -458,9 +462,9 @@ impl ScmView {
                 section: Section::Staged,
                 title: "Staged Changes".into(),
                 count: self.status.staged.len(),
-                collapsed: self.staged_collapsed,
+                collapsed: self.sections.staged_collapsed,
             });
-            if !self.staged_collapsed {
+            if !self.sections.staged_collapsed {
                 for i in 0..self.status.staged.len() {
                     self.selectable.push(self.rows.len());
                     self.rows.push(Row::File {
@@ -476,9 +480,9 @@ impl ScmView {
                 section: Section::Changes,
                 title: "Changes".into(),
                 count: self.status.unstaged.len(),
-                collapsed: self.changes_collapsed,
+                collapsed: self.sections.changes_collapsed,
             });
-            if !self.changes_collapsed {
+            if !self.sections.changes_collapsed {
                 for i in 0..self.status.unstaged.len() {
                     self.selectable.push(self.rows.len());
                     self.rows.push(Row::File {
@@ -491,7 +495,7 @@ impl ScmView {
 
         for drawer in Drawer::ALL {
             self.selectable.push(self.rows.len());
-            let expanded = self.drawer_expanded[drawer.index()];
+            let expanded = self.sections.drawer_expanded[drawer.index()];
             self.rows.push(Row::DrawerHeader {
                 drawer,
                 collapsed: !expanded,
@@ -605,7 +609,7 @@ impl ScmView {
             return;
         }
         self.last_file_path = Some(path);
-        if self.drawer_expanded[Drawer::FileHistory.index()] {
+        if self.sections.drawer_expanded[Drawer::FileHistory.index()] {
             self.load_drawer(Drawer::FileHistory);
             self.rebuild_rows();
         }
@@ -615,8 +619,17 @@ impl ScmView {
         if self.selectable.is_empty() {
             return;
         }
-        let n = self.selectable.len() as isize;
-        self.selected = (self.selected as isize + delta).clamp(0, n - 1) as usize;
+        let len = self.selectable.len();
+        if delta >= 0 {
+            let delta = usize::try_from(delta).unwrap_or(usize::MAX);
+            self.selected = self
+                .selected
+                .saturating_add(delta)
+                .min(len.saturating_sub(1));
+        } else {
+            let delta = usize::try_from(-delta).unwrap_or(usize::MAX);
+            self.selected = self.selected.saturating_sub(delta);
+        }
         self.remember_selected_file();
         self.ensure_visible();
     }
@@ -666,8 +679,8 @@ impl ScmView {
 
     fn set_section_collapsed(&mut self, section: Section, collapsed: bool) {
         match section {
-            Section::Staged => self.staged_collapsed = collapsed,
-            Section::Changes => self.changes_collapsed = collapsed,
+            Section::Staged => self.sections.staged_collapsed = collapsed,
+            Section::Changes => self.sections.changes_collapsed = collapsed,
         }
         self.rebuild_rows();
         self.select_header(section);
@@ -683,10 +696,10 @@ impl ScmView {
             // No selected file: empty drawer. Hint is a one-shot footer flash
             // from set_drawer_expanded only — never from load_drawer, because
             // auto-refresh reloads expanded drawers every 1.5s.
-            Drawer::FileHistory => match self.last_file_path.as_deref() {
-                Some(path) => git.file_history(path, 20),
-                None => Ok(Vec::new()),
-            },
+            Drawer::FileHistory => self
+                .last_file_path
+                .as_deref()
+                .map_or_else(|| Ok(Vec::new()), |path| git.file_history(path, 20)),
             Drawer::Branches => git.branches(),
             Drawer::Worktrees => git.worktrees(),
             Drawer::Remotes => git.remotes(),
@@ -699,11 +712,12 @@ impl ScmView {
                     .into_iter()
                     .map(|line| match drawer {
                         Drawer::Graph => graph_drawer_item(line),
-                        Drawer::Commits | Drawer::FileHistory => log_drawer_item(line),
+                        Drawer::Commits | Drawer::FileHistory | Drawer::Stashes | Drawer::Tags => {
+                            log_drawer_item(line)
+                        }
                         Drawer::Branches => branch_drawer_item(line),
                         Drawer::Worktrees => worktree_drawer_item(line),
                         Drawer::Remotes => remote_drawer_item(line),
-                        Drawer::Stashes | Drawer::Tags => log_drawer_item(line),
                     })
                     .collect();
             }
@@ -724,7 +738,7 @@ impl ScmView {
             }
             self.load_drawer(drawer);
         }
-        self.drawer_expanded[drawer.index()] = expanded;
+        self.sections.drawer_expanded[drawer.index()] = expanded;
         self.rebuild_rows();
         self.select_drawer_header(drawer);
     }
@@ -774,9 +788,9 @@ impl ScmView {
     }
 
     fn collapse_all(&mut self) -> KeyOutcome {
-        self.staged_collapsed = true;
-        self.changes_collapsed = true;
-        self.drawer_expanded.fill(false);
+        self.sections.staged_collapsed = true;
+        self.sections.changes_collapsed = true;
+        self.sections.drawer_expanded.fill(false);
         self.rebuild_rows();
         KeyOutcome::Handled
     }
@@ -1029,12 +1043,14 @@ impl ScmView {
                 KeyOutcome::Handled
             }
             a if a == config::internal::PAGE_UP => {
-                let page = self.body_height.get().max(2).saturating_sub(1) as isize;
+                let page = isize::try_from(self.body_height.get().max(2).saturating_sub(1))
+                    .unwrap_or(isize::MAX);
                 self.move_sel(-page);
                 KeyOutcome::Handled
             }
             a if a == config::internal::PAGE_DOWN => {
-                let page = self.body_height.get().max(2).saturating_sub(1) as isize;
+                let page = isize::try_from(self.body_height.get().max(2).saturating_sub(1))
+                    .unwrap_or(isize::MAX);
                 self.move_sel(page);
                 KeyOutcome::Handled
             }
@@ -1076,8 +1092,7 @@ impl ScmView {
                 let file = self.selected_entry().map(|(_, e)| {
                     self.git
                         .as_ref()
-                        .map(|g| g.abs_path(e))
-                        .unwrap_or_else(|| PathBuf::from(&e.path))
+                        .map_or_else(|| PathBuf::from(&e.path), |g| g.abs_path(e))
                 });
                 KeyOutcome::Shell {
                     action: other.to_string(),
@@ -1092,48 +1107,38 @@ impl ScmView {
         ui::icons::file_glyph(std::path::Path::new(&entry.path), self.nerd_font)
     }
 
-    fn letter_color(&self, letter: char, palette: &Palette) -> ratatui::style::Color {
+    const fn letter_color(letter: char, palette: &Palette) -> ratatui::style::Color {
         match letter {
             'M' => palette.yellow,
             'A' | 'U' => palette.green,
-            'D' => palette.red,
+            'D' | '!' => palette.red,
             'R' | 'C' => palette.blue,
-            '!' => palette.red,
             _ => palette.subtext0,
         }
     }
-}
 
-impl FeatureView for ScmView {
-    fn draw(&self, frame: &mut Frame, area: Rect, palette: &Palette) {
-        self.body_top.set(area.y);
-        self.body_height.set(area.height);
-        if area.height == 0 {
-            return;
-        }
-
-        // Repository identity is its own hierarchy row: root on the left,
-        // branch and sync state aligned independently on the right.
+    fn draw_repo_header(&self, frame: &mut Frame, area: Rect, palette: &Palette) {
+        use std::fmt::Write;
         let repo = self
             .git
             .as_ref()
-            .map(Git::name)
-            .unwrap_or_else(|| "repository".into());
+            .map_or_else(|| "repository".into(), Git::name);
         let mut branch = if self.status.branch.is_empty() {
             "—".to_string()
         } else {
             self.status.branch.clone()
         };
         if self.status.ahead > 0 {
-            branch.push_str(&format!(" ↑{}", self.status.ahead));
+            let _ = write!(branch, " ↑{}", self.status.ahead);
         }
         if self.status.behind > 0 {
-            branch.push_str(&format!(" ↓{}", self.status.behind));
+            let _ = write!(branch, " ↓{}", self.status.behind);
         }
         if self.syncing.is_some() {
             branch.push_str(" ⇅");
         }
-        let branch_width = (branch.chars().count() as u16 + 1).min(area.width / 2);
+        let count = u16::try_from(branch.chars().count()).unwrap_or(u16::MAX);
+        let branch_width = count.saturating_add(1).min(area.width / 2);
         let repo_rect = Rect::new(area.x, area.y, area.width.saturating_sub(branch_width), 1);
         let branch_rect = Rect::new(
             area.x
@@ -1160,11 +1165,9 @@ impl FeatureView for ScmView {
                 .style(Style::default().fg(palette.yellow)),
             branch_rect,
         );
+    }
 
-        if area.height < 5 {
-            return;
-        }
-
+    fn draw_commit_controls(&self, frame: &mut Frame, area: Rect, palette: &Palette) {
         let message_rect = Rect::new(area.x, area.y.saturating_add(1), area.width, 3);
         self.message_rect.set(message_rect);
         let mut shown = self.message.clone();
@@ -1240,6 +1243,202 @@ impl FeatureView for ScmView {
                 .style(commit_style),
             commit_rect,
         );
+    }
+
+    fn draw_header_row(
+        &self,
+        frame: &mut Frame,
+        title: &str,
+        count: usize,
+        collapsed: bool,
+        location: (usize, Rect),
+        palette: &Palette,
+    ) {
+        let (abs_line, rect) = location;
+        let selected = self
+            .selectable
+            .get(self.selected)
+            .is_some_and(|&row| row == abs_line);
+        let background = selected.then_some(palette.surface1);
+        let title_style = background.map_or_else(
+            || Style::default().fg(palette.text),
+            |color| Style::default().fg(palette.text).bg(color),
+        );
+        let (title_rect, badge_rect) = header_columns(rect, count);
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::raw(" "),
+                Span::styled(
+                    if collapsed { "▸ " } else { "▾ " },
+                    title_style.add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(title, title_style.add_modifier(Modifier::BOLD)),
+            ]))
+            .style(title_style),
+            title_rect,
+        );
+        frame.render_widget(
+            Paragraph::new(count.to_string())
+                .alignment(Alignment::Center)
+                .style(
+                    Style::default()
+                        .fg(palette.panel_bg)
+                        .bg(palette.accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            badge_rect,
+        );
+    }
+
+    fn draw_file_row(
+        &self,
+        frame: &mut Frame,
+        staged: bool,
+        index: usize,
+        abs_line: usize,
+        rect: Rect,
+        palette: &Palette,
+    ) {
+        let list = if staged {
+            &self.status.staged
+        } else {
+            &self.status.unstaged
+        };
+        let Some(entry) = list.get(index) else {
+            return;
+        };
+        let is_sel = self
+            .selectable
+            .get(self.selected)
+            .is_some_and(|&r| r == abs_line);
+        let file_icon = self.glyph_for(entry);
+        let icon_fg = file_icon.color.unwrap_or(palette.text);
+        let bg = if is_sel { Some(palette.surface1) } else { None };
+        let with_bg = |s: Style| bg.map_or(s, |b| s.bg(b));
+        let letter_fg = Self::letter_color(entry.letter, palette);
+        let name_style = if is_sel {
+            with_bg(
+                Style::default()
+                    .fg(palette.text)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            with_bg(Style::default().fg(palette.text))
+        };
+        let (name, parent) = display_path_parts(&entry.path);
+        let mut spans = vec![
+            Span::styled("  ", with_bg(Style::default())),
+            Span::styled(
+                format!("{} ", file_icon.glyph),
+                with_bg(Style::default().fg(icon_fg)),
+            ),
+            Span::styled(name.to_string(), name_style),
+        ];
+        if let Some(parent) = parent {
+            spans.push(Span::styled(
+                format!("  {parent}"),
+                with_bg(
+                    Style::default()
+                        .fg(palette.text)
+                        .add_modifier(Modifier::DIM),
+                ),
+            ));
+        }
+        let line = Line::from(spans);
+        let row_style = bg.map_or_else(Style::default, |b| Style::default().bg(b));
+        let (name_rect, status_rect) = status_columns(rect);
+        frame.render_widget(Paragraph::new("").style(row_style), rect);
+        frame.render_widget(Paragraph::new(line).style(row_style), name_rect);
+        frame.render_widget(
+            Paragraph::new(entry.letter.to_string())
+                .alignment(Alignment::Center)
+                .style(with_bg(
+                    Style::default().fg(letter_fg).add_modifier(Modifier::BOLD),
+                )),
+            status_rect,
+        );
+    }
+
+    fn draw_row(
+        &self,
+        frame: &mut Frame,
+        row: &Row,
+        abs_line: usize,
+        rect: Rect,
+        palette: &Palette,
+    ) {
+        match row {
+            Row::Header {
+                title,
+                count,
+                collapsed,
+                ..
+            } => {
+                self.draw_header_row(frame, title, *count, *collapsed, (abs_line, rect), palette);
+            }
+            Row::File { staged, index } => {
+                self.draw_file_row(frame, *staged, *index, abs_line, rect, palette);
+            }
+            Row::DrawerHeader { drawer, collapsed } => {
+                let selected = self
+                    .selectable
+                    .get(self.selected)
+                    .is_some_and(|&r| r == abs_line);
+                let style = if selected {
+                    Style::default().fg(palette.text).bg(palette.surface1)
+                } else {
+                    Style::default().fg(palette.text)
+                };
+                frame.render_widget(
+                    Paragraph::new(Line::from(vec![
+                        Span::styled(
+                            if *collapsed { " ▸ " } else { " ▾ " },
+                            style.fg(palette.accent),
+                        ),
+                        Span::styled(drawer.title(), style.add_modifier(Modifier::BOLD)),
+                    ]))
+                    .style(style),
+                    rect,
+                );
+            }
+            Row::DrawerLine { drawer, index } => {
+                let selected = self
+                    .selectable
+                    .get(self.selected)
+                    .is_some_and(|&r| r == abs_line);
+                let style = if selected {
+                    Style::default().fg(palette.text).bg(palette.surface1)
+                } else {
+                    Style::default()
+                        .fg(palette.text)
+                        .add_modifier(Modifier::DIM)
+                };
+                if let Some(item) = self.drawer_lines[drawer.index()].get(*index) {
+                    frame.render_widget(
+                        Paragraph::new(format!("    {}", item.display)).style(style),
+                        rect,
+                    );
+                }
+            }
+        }
+    }
+}
+
+impl FeatureView for ScmView {
+    fn draw(&self, frame: &mut Frame, area: Rect, palette: &Palette) {
+        self.body_top.set(area.y);
+        self.body_height.set(area.height);
+        if area.height == 0 {
+            return;
+        }
+
+        self.draw_repo_header(frame, area, palette);
+
+        if area.height < 5 {
+            return;
+        }
+
+        self.draw_commit_controls(frame, area, palette);
 
         // One breathing row between the primary action and the SCM hierarchy.
         let body = Rect {
@@ -1259,7 +1458,7 @@ impl FeatureView for ScmView {
         } else {
             let h = body.height as usize;
             for (i, row) in self.rows.iter().skip(self.scroll).take(h).enumerate() {
-                let y = body.y.saturating_add(i as u16);
+                let y = body.y.saturating_add(u16::try_from(i).unwrap_or(u16::MAX));
                 let abs_line = self.scroll + i;
                 let rect = Rect {
                     x: body.x,
@@ -1267,160 +1466,7 @@ impl FeatureView for ScmView {
                     width: body.width,
                     height: 1,
                 };
-                match row {
-                    Row::Header {
-                        section: _,
-                        title,
-                        count,
-                        collapsed,
-                    } => {
-                        let selected = self
-                            .selectable
-                            .get(self.selected)
-                            .is_some_and(|&row| row == abs_line);
-                        let background = selected.then_some(palette.surface1);
-                        let title_style = background.map_or_else(
-                            || Style::default().fg(palette.text),
-                            |color| Style::default().fg(palette.text).bg(color),
-                        );
-                        let (title_rect, badge_rect) = header_columns(rect, *count);
-                        frame.render_widget(
-                            Paragraph::new(Line::from(vec![
-                                Span::raw(" "),
-                                Span::styled(
-                                    if *collapsed { "▸ " } else { "▾ " },
-                                    title_style.add_modifier(Modifier::BOLD),
-                                ),
-                                Span::styled(
-                                    title.as_str(),
-                                    title_style.add_modifier(Modifier::BOLD),
-                                ),
-                            ]))
-                            .style(title_style),
-                            title_rect,
-                        );
-                        frame.render_widget(
-                            Paragraph::new(count.to_string())
-                                .alignment(Alignment::Center)
-                                .style(
-                                    Style::default()
-                                        .fg(palette.panel_bg)
-                                        .bg(palette.accent)
-                                        .add_modifier(Modifier::BOLD),
-                                ),
-                            badge_rect,
-                        );
-                    }
-                    Row::File { staged, index } => {
-                        let list = if *staged {
-                            &self.status.staged
-                        } else {
-                            &self.status.unstaged
-                        };
-                        let Some(entry) = list.get(*index) else {
-                            continue;
-                        };
-                        let is_sel = self
-                            .selectable
-                            .get(self.selected)
-                            .is_some_and(|&r| r == abs_line);
-                        let file_icon = self.glyph_for(entry);
-                        let icon_fg = file_icon.color.unwrap_or(palette.text);
-                        let bg = if is_sel { Some(palette.surface1) } else { None };
-                        let with_bg = |s: Style| match bg {
-                            Some(b) => s.bg(b),
-                            None => s,
-                        };
-                        let letter_fg = self.letter_color(entry.letter, palette);
-                        let name_style = if is_sel {
-                            with_bg(
-                                Style::default()
-                                    .fg(palette.text)
-                                    .add_modifier(Modifier::BOLD),
-                            )
-                        } else {
-                            with_bg(Style::default().fg(palette.text))
-                        };
-                        let (name, parent) = display_path_parts(&entry.path);
-                        let mut spans = vec![
-                            Span::styled("  ", with_bg(Style::default())),
-                            Span::styled(
-                                format!("{} ", file_icon.glyph),
-                                with_bg(Style::default().fg(icon_fg)),
-                            ),
-                            Span::styled(name.to_string(), name_style),
-                        ];
-                        if let Some(parent) = parent {
-                            spans.push(Span::styled(
-                                format!("  {parent}"),
-                                with_bg(
-                                    Style::default()
-                                        .fg(palette.text)
-                                        .add_modifier(Modifier::DIM),
-                                ),
-                            ));
-                        }
-                        let line = Line::from(spans);
-                        let row_style = match bg {
-                            Some(b) => Style::default().bg(b),
-                            None => Style::default(),
-                        };
-                        let (name_rect, status_rect) = status_columns(rect);
-                        // Paint the row once, then render two independent
-                        // columns. Status letters no longer move with path length.
-                        frame.render_widget(Paragraph::new("").style(row_style), rect);
-                        frame.render_widget(Paragraph::new(line).style(row_style), name_rect);
-                        frame.render_widget(
-                            Paragraph::new(entry.letter.to_string())
-                                .alignment(Alignment::Center)
-                                .style(with_bg(
-                                    Style::default().fg(letter_fg).add_modifier(Modifier::BOLD),
-                                )),
-                            status_rect,
-                        );
-                    }
-                    Row::DrawerHeader { drawer, collapsed } => {
-                        let selected = self
-                            .selectable
-                            .get(self.selected)
-                            .is_some_and(|&row| row == abs_line);
-                        let style = if selected {
-                            Style::default().fg(palette.text).bg(palette.surface1)
-                        } else {
-                            Style::default().fg(palette.text)
-                        };
-                        frame.render_widget(
-                            Paragraph::new(Line::from(vec![
-                                Span::styled(
-                                    if *collapsed { " ▸ " } else { " ▾ " },
-                                    style.fg(palette.accent),
-                                ),
-                                Span::styled(drawer.title(), style.add_modifier(Modifier::BOLD)),
-                            ]))
-                            .style(style),
-                            rect,
-                        );
-                    }
-                    Row::DrawerLine { drawer, index } => {
-                        let selected = self
-                            .selectable
-                            .get(self.selected)
-                            .is_some_and(|&row| row == abs_line);
-                        let style = if selected {
-                            Style::default().fg(palette.text).bg(palette.surface1)
-                        } else {
-                            Style::default()
-                                .fg(palette.text)
-                                .add_modifier(Modifier::DIM)
-                        };
-                        if let Some(item) = self.drawer_lines[drawer.index()].get(*index) {
-                            frame.render_widget(
-                                Paragraph::new(format!("    {}", item.display)).style(style),
-                                rect,
-                            );
-                        }
-                    }
-                }
+                self.draw_row(frame, row, abs_line, rect, palette);
             }
         }
 
@@ -1600,15 +1646,15 @@ mod tests {
             Arc::new(Config::for_test()),
         );
         view.set_flash("done", false);
-        view.flash_at = Some(Instant::now() - Duration::from_secs(3));
+        view.flash_at = Some(Instant::now().checked_sub(Duration::from_secs(3)).unwrap());
         view.expire_flash();
         assert!(view.flash.is_none());
 
         view.set_flash("failed", true);
-        view.flash_at = Some(Instant::now() - Duration::from_secs(3));
+        view.flash_at = Some(Instant::now().checked_sub(Duration::from_secs(3)).unwrap());
         view.expire_flash();
         assert!(view.flash.is_some());
-        view.flash_at = Some(Instant::now() - Duration::from_secs(5));
+        view.flash_at = Some(Instant::now().checked_sub(Duration::from_secs(5)).unwrap());
         view.expire_flash();
         assert!(view.flash.is_none());
 
@@ -1752,7 +1798,7 @@ mod tests {
         assert!(matches!(view.selected_row(), Some(Row::Header { .. })));
 
         assert_eq!(view.toggle_selected(), KeyOutcome::Handled);
-        assert!(view.staged_collapsed);
+        assert!(view.sections.staged_collapsed);
         assert_eq!(
             view.rows
                 .iter()
@@ -1769,7 +1815,7 @@ mod tests {
         ));
 
         view.toggle_selected();
-        assert!(!view.staged_collapsed);
+        assert!(!view.sections.staged_collapsed);
         assert_eq!(
             view.rows
                 .iter()

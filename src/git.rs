@@ -1,8 +1,9 @@
-//! Git plumbing for the SCM feature: repo discovery, `status --porcelain -z`
-//! parsing, and the stage / unstage operations, all via the `git` CLI (no
-//! libgit2). Parsing is pure and unit-tested; commands run with the repo
-//! toplevel as cwd so the repo-relative paths porcelain reports resolve even
-//! when the pane's cwd is a subdirectory.
+//! Git plumbing for the SCM feature.
+//!
+//! Handles repo discovery, `status --porcelain -z` parsing, and the stage / unstage
+//! operations, all via the `git` CLI (no libgit2). Parsing is pure and unit-tested;
+//! commands run with the repo toplevel as cwd so the repo-relative paths porcelain reports
+//! resolve even when the pane's cwd is a subdirectory.
 //!
 //! Scope split (see design notes): reading and mutating the index live in
 //! Rust for instant refresh; diff rendering and commit go through `config.sh`
@@ -43,36 +44,47 @@ pub struct Git {
 }
 
 impl Git {
-    /// Locate the repository containing `dir`; Err with git's message when there
-    /// is none (or git itself is missing).
-    pub fn discover(dir: &Path) -> Result<Git, String> {
+    /// Locate the repository containing `dir`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` with git's message when there is none (or git itself is missing).
+    pub fn discover(dir: &Path) -> Result<Self, String> {
         let out = run_in(dir, &["rev-parse", "--show-toplevel"])?;
         let root = out.trim();
         if root.is_empty() {
             return Err("not inside a git repository".to_string());
         }
-        Ok(Git {
+        Ok(Self {
             root: PathBuf::from(root),
         })
     }
 
+    #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
     }
 
     /// Absolute path of a repo-relative entry (for the diff shell action).
+    #[must_use]
     pub fn abs_path(&self, entry: &FileEntry) -> PathBuf {
         self.root.join(&entry.path)
     }
 
     /// Display name for the repo header: the root directory's name.
+    #[must_use]
     pub fn name(&self) -> String {
-        self.root
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| self.root.display().to_string())
+        self.root.file_name().map_or_else(
+            || self.root.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        )
     }
 
+    /// Read the working tree status.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if running `git status` fails.
     pub fn status(&self) -> Result<Status, String> {
         let out = run_in(
             &self.root,
@@ -88,16 +100,29 @@ impl Git {
     }
 
     /// Stage one entry: `add -A` records modifications, additions, and deletions alike.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if `git add` fails.
     pub fn stage(&self, entry: &FileEntry) -> Result<(), String> {
         run_in(&self.root, &["add", "-A", "--", &entry.path]).map(drop)
     }
 
+    /// Stage all modified, added, and deleted files in the repository.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if `git add` fails.
     pub fn stage_all(&self) -> Result<(), String> {
         run_in(&self.root, &["add", "-A"]).map(drop)
     }
 
     /// Unstage one entry. `reset` needs a HEAD to reset against; on an unborn
     /// branch (no commits yet) fall back to dropping the path from the index.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if unstaging fails.
     pub fn unstage(&self, entry: &FileEntry) -> Result<(), String> {
         let mut args = vec!["reset", "-q", "--"];
         args.extend(unstage_pathspecs(entry));
@@ -111,6 +136,11 @@ impl Git {
         .map(drop)
     }
 
+    /// Unstage all changes in the index.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if unstaging fails.
     pub fn unstage_all(&self) -> Result<(), String> {
         if run_in(&self.root, &["reset", "-q"]).is_ok() {
             return Ok(());
@@ -120,6 +150,10 @@ impl Git {
 
     /// Permanently discard one unstaged entry. Untracked files are removed;
     /// tracked paths are restored from the index. The UI must confirm first.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if file removal or restoring from git fails.
     pub fn discard(&self, entry: &FileEntry) -> Result<(), String> {
         if entry.letter == 'U' {
             let path = safe_repo_path(&self.root, &entry.path)?;
@@ -141,6 +175,11 @@ impl Git {
         }
     }
 
+    /// Fetch recent log graph lines.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if git log fails.
     pub fn graph(&self, limit: usize) -> Result<Vec<String>, String> {
         git_lines(
             &self.root,
@@ -154,6 +193,11 @@ impl Git {
         )
     }
 
+    /// Fetch recent commits for the log drawer.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if git log fails.
     pub fn commits(&self, limit: usize) -> Result<Vec<String>, String> {
         git_lines(
             &self.root,
@@ -161,6 +205,11 @@ impl Git {
         )
     }
 
+    /// Fetch commit history for a specific file path.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if git log fails.
     pub fn file_history(&self, path: &str, limit: usize) -> Result<Vec<String>, String> {
         git_lines(
             &self.root,
@@ -175,6 +224,11 @@ impl Git {
         )
     }
 
+    /// List repository branches sorted by committer date.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if git branch fails.
     pub fn branches(&self) -> Result<Vec<String>, String> {
         git_lines(
             &self.root,
@@ -187,6 +241,11 @@ impl Git {
         )
     }
 
+    /// List git worktrees for the repository.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if git worktree fails.
     pub fn worktrees(&self) -> Result<Vec<String>, String> {
         let raw = run_in(&self.root, &["worktree", "list", "--porcelain"])?;
         Ok(raw
@@ -210,6 +269,11 @@ impl Git {
             .collect())
     }
 
+    /// List git remotes with their fetch URLs.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if git remote fails.
     pub fn remotes(&self) -> Result<Vec<String>, String> {
         let lines = git_lines(&self.root, &["remote", "-v"])?;
         let mut seen = std::collections::HashSet::new();
@@ -228,10 +292,20 @@ impl Git {
             .collect())
     }
 
+    /// List stashes in the repository.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if git stash fails.
     pub fn stashes(&self) -> Result<Vec<String>, String> {
         git_lines(&self.root, &["stash", "list", "--format=%gd%x09%s"])
     }
 
+    /// List tags sorted by creator date.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if git tag fails.
     pub fn tags(&self) -> Result<Vec<String>, String> {
         git_lines(
             &self.root,
@@ -245,6 +319,10 @@ impl Git {
 
     /// Synchronize the current branch without blocking the TUI caller.
     /// The view runs this method on a worker thread.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if fetching, pulling, or pushing fails.
     pub fn sync(&self, status: &Status) -> Result<String, String> {
         if !status.has_upstream {
             return Err("branch has no upstream".into());
@@ -324,9 +402,10 @@ fn run_in(dir: &Path, args: &[&str]) -> Result<String, String> {
         .to_string())
 }
 
-/// Parse `git status --porcelain -z --branch` output. Entries are NUL-separated
-/// `XY path`; a rename/copy is followed by a second NUL-separated field holding
-/// the source path. X is the index (staged) state, Y the worktree state.
+/// Parse `git status --porcelain -z --branch` output.
+///
+/// Entries are NUL-separated `XY path`; a rename/copy is followed by a second NUL-separated
+/// field holding the source path. X is the index (staged) state, Y the worktree state.
 pub fn parse_status(raw: &str) -> Status {
     let mut status = Status::default();
     let mut parts = raw.split('\0');
@@ -396,15 +475,15 @@ fn split_entry(entry: &str) -> Option<((char, char), &str)> {
     Some(((bytes[0] as char, bytes[1] as char), &entry[3..]))
 }
 
-fn is_conflict(x: char, y: char) -> bool {
+const fn is_conflict(x: char, y: char) -> bool {
     matches!(
         (x, y),
-        ('D', 'D') | ('A', 'U') | ('U', 'D') | ('U', 'A') | ('D', 'U') | ('A', 'A') | ('U', 'U')
+        ('D' | 'U', 'D') | ('A' | 'D' | 'U', 'U') | ('U' | 'A', 'A')
     )
 }
 
 /// Type changes (T) read as plain modifications, matching VS Code.
-fn display_letter(c: char) -> char {
+const fn display_letter(c: char) -> char {
     if c == 'T' {
         'M'
     } else {

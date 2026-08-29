@@ -20,7 +20,9 @@ pub use app::{run, DetailResource, InitialView};
 
 #[cfg(test)]
 mod tests {
-    use super::app::{tabs_for, ComposeKind, Detail, DetailApp, DetailResource, InitialView, Mode, Tab};
+    use super::app::{
+        tabs_for, ComposeKind, Detail, DetailApp, DetailResource, InitialView, Mode, Tab,
+    };
     use super::images::extract_html_img;
     use super::markdown::{display_width, flush_block, render_markdown, wrap_text};
     use crate::config::Config;
@@ -118,7 +120,8 @@ mod tests {
         for line in &lines {
             assert!(
                 display_width(line) <= 10,
-                "line {line:?} is {} cols", display_width(line)
+                "line {line:?} is {} cols",
+                display_width(line)
             );
         }
         assert_eq!(lines.concat(), text);
@@ -139,7 +142,8 @@ mod tests {
             let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
             assert!(
                 display_width(&text) <= 40,
-                "line {text:?} is {} cols", display_width(&text)
+                "line {text:?} is {} cols",
+                display_width(&text)
             );
         }
     }
@@ -183,11 +187,8 @@ mod tests {
     #[test]
     fn heading_spaces_survive_soft_breaks() {
         let palette = Palette::resolve();
-        let (lines, _) = render_markdown(
-            "### Expected behavior\n\nSteps to reproduce",
-            80,
-            &palette,
-        );
+        let (lines, _) =
+            render_markdown("### Expected behavior\n\nSteps to reproduce", 80, &palette);
         let joined: String = lines
             .iter()
             .map(|line| {
@@ -217,9 +218,7 @@ mod tests {
         let body = "see\n\nhttps://github.com/user-attachments/assets/80598080-ce5b-4208-9fa7-b08f6338e51f\n\ndone";
         let (lines, images) = render_markdown(body, 80, &palette);
         assert_eq!(images.len(), 1);
-        assert!(images[0]
-            .1
-            .contains("github.com/user-attachments/assets/"));
+        assert!(images[0].1.contains("github.com/user-attachments/assets/"));
         assert!(lines.iter().any(|line| line
             .spans
             .iter()
@@ -260,7 +259,8 @@ mod tests {
     #[test]
     fn image_links_always_keep_a_textual_row() {
         let palette = Palette::resolve();
-        let (lines, images) = render_markdown("![diagram](https://example.test/x.png)", 60, &palette);
+        let (lines, images) =
+            render_markdown("![diagram](https://example.test/x.png)", 60, &palette);
         assert_eq!(images.len(), 1);
         assert!(lines.iter().any(|line| line
             .spans
@@ -374,5 +374,3 @@ mod tests {
         ));
     }
 }
-
-

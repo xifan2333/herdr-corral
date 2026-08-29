@@ -21,18 +21,21 @@ pub struct NerdFontSupport {
 
 impl NerdFontSupport {
     /// Convenience: treat only a confident yes as "use icons".
+    #[must_use]
     pub fn should_use_icons(&self) -> bool {
         self.available == Some(true)
     }
 }
 
 /// Detect Nerd Font support from the current process environment.
+#[must_use]
 pub fn detect() -> NerdFontSupport {
     let vars: Vec<(String, String)> = std::env::vars().collect();
     from_result(has_nerd_font::detect(&vars))
 }
 
 /// True when detection says Nerd Font glyphs are available.
+#[must_use]
 pub fn has_nerd_font() -> bool {
     detect().should_use_icons()
 }
@@ -58,7 +61,8 @@ pub struct FileGlyph {
 }
 
 /// Directory open/closed glyphs (Nerd Font or ASCII fallback).
-pub fn dir_glyph(open: bool, nerd_font: bool) -> FileGlyph {
+#[must_use]
+pub const fn dir_glyph(open: bool, nerd_font: bool) -> FileGlyph {
     if nerd_font {
         FileGlyph {
             glyph: if open {
@@ -77,6 +81,7 @@ pub fn dir_glyph(open: bool, nerd_font: bool) -> FileGlyph {
 }
 
 /// File-type glyph for `path` when Nerd Fonts are available; plain fallback otherwise.
+#[must_use]
 pub fn file_glyph(path: &Path, nerd_font: bool) -> FileGlyph {
     if !nerd_font {
         return FileGlyph {
@@ -100,13 +105,16 @@ fn icon_char_str(c: char) -> &'static str {
     use std::collections::HashMap;
     use std::sync::Mutex;
     static CACHE: Mutex<Option<HashMap<char, &'static str>>> = Mutex::new(None);
-    let mut guard = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    let map = guard.get_or_insert_with(HashMap::new);
-    if let Some(s) = map.get(&c) {
-        return s;
+    let mut guard = CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(map) = guard.as_ref() {
+        if let Some(&s) = map.get(&c) {
+            return s;
+        }
     }
     let s: &'static str = Box::leak(c.to_string().into_boxed_str());
-    map.insert(c, s);
+    guard.get_or_insert_with(HashMap::new).insert(c, s);
     s
 }
 

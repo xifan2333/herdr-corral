@@ -40,7 +40,8 @@ pub struct ActivityBar {
 }
 
 /// True when `(col, row)` lands inside `rect`.
-pub fn hit(rect: Rect, col: u16, row: u16) -> bool {
+#[must_use]
+pub const fn hit(rect: Rect, col: u16, row: u16) -> bool {
     col >= rect.x
         && col < rect.x.saturating_add(rect.width)
         && row >= rect.y
@@ -92,7 +93,7 @@ pub fn draw_activity(
     let mut x = mid.x;
     let mut bounds: Vec<(Feature, u16, u16)> = Vec::with_capacity(items.len());
     for (i, span) in spans.iter().enumerate() {
-        let w = span.width() as u16;
+        let w = u16::try_from(span.width()).unwrap_or(u16::MAX);
         if i % 2 == 1 {
             // chip span at indices 1, 3, 5…
             let fi = i / 2;

@@ -51,7 +51,7 @@ impl Palette {
     ///
     /// - Herdr config present → same resolution as Herdr (name + custom overrides)
     /// - no Herdr config (standalone / missing install) → built-in `terminal` palette
-    pub fn resolve() -> Palette {
+    pub fn resolve() -> Self {
         match ThemeConfig::try_read() {
             Some(cfg) => {
                 // auto_switch needs host light/dark detection; without it we default
@@ -73,11 +73,13 @@ impl Palette {
     }
 
     /// Resolve a built-in theme by name, ignoring config (previews/tests).
-    pub fn named(name: &str) -> Option<Palette> {
+    #[must_use]
+    pub fn named(name: &str) -> Option<Self> {
         from_name(name)
     }
 
     /// Token value by name (`"accent"`, `"red"`, ...).
+    #[must_use]
     pub fn token(&self, name: &str) -> Option<Color> {
         Some(match name {
             "accent" => self.accent,
@@ -171,7 +173,7 @@ impl ThemeConfig {
 
     /// Read Herdr's theme config when the file exists and parses.
     /// `None` means no Herdr config available (standalone fallback path).
-    fn try_read() -> Option<ThemeConfig> {
+    fn try_read() -> Option<Self> {
         let path = herdr_config_path()?;
         let text = std::fs::read_to_string(path).ok()?;
         // File exists but parse fails → treat as empty theme section, not standalone.
@@ -208,7 +210,8 @@ impl ThemeConfig {
     }
 }
 
-/// Port of Herdr's `config::theme::parse_color` (hex / rgb() / named / reset).
+/// Port of Herdr's `config::theme::parse_color` (hex / `rgb()` / named / reset).
+#[must_use]
 pub fn parse_color(s: &str) -> Color {
     let s = s.trim().to_lowercase();
     match s.as_str() {
@@ -253,7 +256,6 @@ pub fn parse_color(s: &str) -> Color {
         "yellow" => Color::Yellow,
         "blue" => Color::Blue,
         "magenta" | "purple" => Color::Magenta,
-        "cyan" => Color::Cyan,
         "white" => Color::White,
         "gray" | "grey" => Color::Gray,
         "darkgray" | "darkgrey" => Color::DarkGray,
@@ -263,7 +265,7 @@ pub fn parse_color(s: &str) -> Color {
         "lightblue" => Color::LightBlue,
         "lightmagenta" => Color::LightMagenta,
         "lightcyan" => Color::LightCyan,
-        _ => Color::Cyan, // Herdr falls back to cyan
+        _ => Color::Cyan, // Herdr falls back to cyan (including "cyan")
     }
 }
 
@@ -280,6 +282,7 @@ fn herdr_config_path() -> Option<PathBuf> {
 // --- built-in palettes (ported verbatim from herdr v0.7.4) ------------------
 
 /// Resolve a built-in theme by name, mirroring Herdr's `Palette::from_name`.
+#[must_use]
 pub fn from_name(name: &str) -> Option<Palette> {
     let norm = name.to_lowercase().replace([' ', '_'], "-");
     Some(match norm.as_str() {
@@ -309,7 +312,8 @@ const fn rgb(r: u8, g: u8, b: u8) -> Color {
     Color::Rgb(r, g, b)
 }
 
-pub fn catppuccin() -> Palette {
+#[must_use]
+pub const fn catppuccin() -> Palette {
     Palette {
         name: "catppuccin",
         accent: rgb(137, 180, 250),
@@ -331,7 +335,8 @@ pub fn catppuccin() -> Palette {
     }
 }
 
-pub fn catppuccin_latte() -> Palette {
+#[must_use]
+pub const fn catppuccin_latte() -> Palette {
     Palette {
         name: "catppuccin-latte",
         accent: rgb(30, 102, 245),
@@ -355,7 +360,8 @@ pub fn catppuccin_latte() -> Palette {
 
 /// The `terminal` theme: tokens are ANSI names, so it follows the terminal's
 /// own palette.
-pub fn terminal() -> Palette {
+#[must_use]
+pub const fn terminal() -> Palette {
     Palette {
         name: "terminal",
         accent: Color::Blue,
@@ -377,7 +383,8 @@ pub fn terminal() -> Palette {
     }
 }
 
-pub fn tokyo_night() -> Palette {
+#[must_use]
+pub const fn tokyo_night() -> Palette {
     Palette {
         name: "tokyo-night",
         accent: rgb(122, 162, 247),
@@ -399,7 +406,8 @@ pub fn tokyo_night() -> Palette {
     }
 }
 
-pub fn tokyo_night_day() -> Palette {
+#[must_use]
+pub const fn tokyo_night_day() -> Palette {
     Palette {
         name: "tokyo-night-day",
         accent: rgb(46, 125, 233),
@@ -421,7 +429,8 @@ pub fn tokyo_night_day() -> Palette {
     }
 }
 
-pub fn dracula() -> Palette {
+#[must_use]
+pub const fn dracula() -> Palette {
     Palette {
         name: "dracula",
         accent: rgb(189, 147, 249),
@@ -443,7 +452,8 @@ pub fn dracula() -> Palette {
     }
 }
 
-pub fn nord() -> Palette {
+#[must_use]
+pub const fn nord() -> Palette {
     Palette {
         name: "nord",
         accent: rgb(136, 192, 208),
@@ -465,7 +475,8 @@ pub fn nord() -> Palette {
     }
 }
 
-pub fn gruvbox() -> Palette {
+#[must_use]
+pub const fn gruvbox() -> Palette {
     Palette {
         name: "gruvbox",
         accent: rgb(215, 153, 33),
@@ -487,7 +498,8 @@ pub fn gruvbox() -> Palette {
     }
 }
 
-pub fn gruvbox_light() -> Palette {
+#[must_use]
+pub const fn gruvbox_light() -> Palette {
     Palette {
         name: "gruvbox-light",
         accent: rgb(7, 102, 120),
@@ -509,7 +521,8 @@ pub fn gruvbox_light() -> Palette {
     }
 }
 
-pub fn one_dark() -> Palette {
+#[must_use]
+pub const fn one_dark() -> Palette {
     Palette {
         name: "one-dark",
         accent: rgb(97, 175, 239),
@@ -531,7 +544,8 @@ pub fn one_dark() -> Palette {
     }
 }
 
-pub fn one_light() -> Palette {
+#[must_use]
+pub const fn one_light() -> Palette {
     Palette {
         name: "one-light",
         accent: rgb(64, 120, 242),
@@ -553,7 +567,8 @@ pub fn one_light() -> Palette {
     }
 }
 
-pub fn solarized() -> Palette {
+#[must_use]
+pub const fn solarized() -> Palette {
     Palette {
         name: "solarized",
         accent: rgb(38, 139, 210),
@@ -575,7 +590,8 @@ pub fn solarized() -> Palette {
     }
 }
 
-pub fn solarized_light() -> Palette {
+#[must_use]
+pub const fn solarized_light() -> Palette {
     Palette {
         name: "solarized-light",
         accent: rgb(38, 139, 210),
@@ -597,7 +613,8 @@ pub fn solarized_light() -> Palette {
     }
 }
 
-pub fn kanagawa() -> Palette {
+#[must_use]
+pub const fn kanagawa() -> Palette {
     Palette {
         name: "kanagawa",
         accent: rgb(126, 156, 216),
@@ -619,7 +636,8 @@ pub fn kanagawa() -> Palette {
     }
 }
 
-pub fn kanagawa_lotus() -> Palette {
+#[must_use]
+pub const fn kanagawa_lotus() -> Palette {
     Palette {
         name: "kanagawa-lotus",
         accent: rgb(77, 105, 155),
@@ -641,7 +659,8 @@ pub fn kanagawa_lotus() -> Palette {
     }
 }
 
-pub fn rose_pine() -> Palette {
+#[must_use]
+pub const fn rose_pine() -> Palette {
     Palette {
         name: "rose-pine",
         accent: rgb(196, 167, 231),
@@ -663,7 +682,8 @@ pub fn rose_pine() -> Palette {
     }
 }
 
-pub fn rose_pine_dawn() -> Palette {
+#[must_use]
+pub const fn rose_pine_dawn() -> Palette {
     Palette {
         name: "rose-pine-dawn",
         accent: rgb(144, 122, 169),
@@ -685,7 +705,8 @@ pub fn rose_pine_dawn() -> Palette {
     }
 }
 
-pub fn vesper() -> Palette {
+#[must_use]
+pub const fn vesper() -> Palette {
     Palette {
         name: "vesper",
         accent: rgb(255, 199, 153),

@@ -7,9 +7,9 @@
 //! - [`gh`] / [`model`] — CLI adapter + DTOs (data layer)
 //! - [`detail`] — full-width `corral-github` interactive client
 
+pub mod detail;
 mod gh;
 mod model;
-pub mod detail;
 
 pub use detail::{run as run_detail, DetailResource, InitialView};
 pub use gh::GhCli;
@@ -28,41 +28,45 @@ pub enum MergeMethod {
 }
 
 impl MergeMethod {
-    pub const ALL: [MergeMethod; 3] =
-        [MergeMethod::Merge, MergeMethod::Squash, MergeMethod::Rebase];
+    pub const ALL: [Self; 3] = [Self::Merge, Self::Squash, Self::Rebase];
 
-    pub fn label(self) -> &'static str {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
         match self {
-            MergeMethod::Merge => "merge",
-            MergeMethod::Squash => "squash",
-            MergeMethod::Rebase => "rebase",
+            Self::Merge => "merge",
+            Self::Squash => "squash",
+            Self::Rebase => "rebase",
         }
     }
 
-    pub fn title(self) -> &'static str {
+    #[must_use]
+    pub const fn title(self) -> &'static str {
         match self {
-            MergeMethod::Merge => "Merge",
-            MergeMethod::Squash => "Squash",
-            MergeMethod::Rebase => "Rebase",
+            Self::Merge => "Merge",
+            Self::Squash => "Squash",
+            Self::Rebase => "Rebase",
         }
     }
 
-    pub fn flag(self) -> &'static str {
+    #[must_use]
+    pub const fn flag(self) -> &'static str {
         match self {
-            MergeMethod::Merge => "--merge",
-            MergeMethod::Squash => "--squash",
-            MergeMethod::Rebase => "--rebase",
+            Self::Merge => "--merge",
+            Self::Squash => "--squash",
+            Self::Rebase => "--rebase",
         }
     }
 
-    pub fn index(self) -> usize {
+    #[must_use]
+    pub const fn index(self) -> usize {
         match self {
-            MergeMethod::Merge => 0,
-            MergeMethod::Squash => 1,
-            MergeMethod::Rebase => 2,
+            Self::Merge => 0,
+            Self::Squash => 1,
+            Self::Rebase => 2,
         }
     }
 
+    #[must_use]
     pub fn from_index(index: usize) -> Option<Self> {
         Self::ALL.get(index).copied()
     }
@@ -113,31 +117,107 @@ pub enum GitHubMutation {
 }
 
 pub trait GitHubDetailAdapter: Send + Sync {
+    /// Fetch full issue details.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the GitHub CLI or API call fails.
     fn issue_detail(&self, repo: &str, number: u64) -> Result<IssueDetail, String>;
+
+    /// Fetch full pull request details.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the GitHub CLI or API call fails.
     fn pull_detail(&self, repo: &str, number: u64) -> Result<PullRequestDetail, String>;
+
+    /// Fetch full workflow run details.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the GitHub CLI or API call fails.
     fn run_detail(&self, repo: &str, run_id: u64) -> Result<WorkflowRunDetail, String>;
+
+    /// Fetch the git patch/diff for a pull request.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if fetching the patch fails.
     fn pull_patch(&self, repo: &str, number: u64) -> Result<String, String>;
+
+    /// Fetch execution logs for a workflow run.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if fetching run logs fails.
     fn run_log(&self, repo: &str, run_id: u64, failed_only: bool) -> Result<String, String>;
+
+    /// Perform a mutation (comment, merge, state change, rerun).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if executing the mutation fails.
     fn mutate(&self, repo: &str, mutation: &GitHubMutation) -> Result<String, String>;
 }
 
 pub trait GitHubAdapter: Send + Sync {
+    /// Discover the current GitHub repository from the current working directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the current directory is not a valid GitHub repository.
     fn discover(&self) -> Result<Repository, String>;
+
+    /// List issues for the repository.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if fetching issues fails.
     fn issues(&self, repo: &Repository, limit: usize, state: &str) -> Result<Vec<Issue>, String>;
+
+    /// List pull requests for the repository.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if fetching pull requests fails.
     fn pulls(
         &self,
         repo: &Repository,
         limit: usize,
         state: &str,
     ) -> Result<Vec<PullRequest>, String>;
+
+    /// List workflow runs for the repository.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if fetching workflow runs fails.
     fn runs(&self, repo: &Repository, limit: usize) -> Result<Vec<WorkflowRun>, String>;
+
+    /// List available workflows for the repository.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if fetching workflows fails.
     fn workflows(&self, repo: &Repository) -> Result<Vec<Workflow>, String>;
+
+    /// Fetch workflow YAML content from a specific git ref.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if reading the workflow file fails.
     fn workflow_yaml(
         &self,
         repo: &Repository,
         workflow: &str,
         r#ref: &str,
     ) -> Result<String, String>;
+
+    /// Dispatch a workflow run with the given inputs.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if triggering the workflow fails.
     fn dispatch_workflow(
         &self,
         repo: &Repository,

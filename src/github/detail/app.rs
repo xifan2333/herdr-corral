@@ -66,15 +66,15 @@ pub(super) enum Tab {
 }
 
 impl Tab {
-    fn title(self) -> &'static str {
+    const fn title(self) -> &'static str {
         match self {
-            Tab::Overview => "OVERVIEW",
-            Tab::Conversation => "CONVERSATION",
-            Tab::Files => "FILES",
-            Tab::Diff => "DIFF",
-            Tab::Checks => "CHECKS",
-            Tab::Jobs => "JOBS",
-            Tab::Log => "LOG",
+            Self::Overview => "OVERVIEW",
+            Self::Conversation => "CONVERSATION",
+            Self::Files => "FILES",
+            Self::Diff => "DIFF",
+            Self::Checks => "CHECKS",
+            Self::Jobs => "JOBS",
+            Self::Log => "LOG",
         }
     }
 }
@@ -93,7 +93,7 @@ pub(super) enum Payload {
     ImageOpen(String),
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum Request {
     Detail,
     Patch,
@@ -131,6 +131,25 @@ pub(super) struct Completion {
     result: Result<Payload, String>,
 }
 
+#[derive(Default)]
+struct DetailLoadingState {
+    active: std::collections::HashSet<Request>,
+}
+
+impl DetailLoadingState {
+    fn contains(&self, request: Request) -> bool {
+        self.active.contains(&request)
+    }
+
+    fn start(&mut self, request: Request) {
+        self.active.insert(request);
+    }
+
+    fn finish(&mut self, request: Request) {
+        self.active.remove(&request);
+    }
+}
+
 pub(super) struct DetailApp {
     repo: String,
     resource: DetailResource,
@@ -144,10 +163,7 @@ pub(super) struct DetailApp {
     active_tab: usize,
     scroll: usize,
     body_height: u16,
-    loading_detail: bool,
-    loading_patch: bool,
-    loading_log: bool,
-    mutation_loading: bool,
+    loading: DetailLoadingState,
     pub(super) mode: Mode,
     notice: Option<(String, bool, Instant)>,
     error: Option<String>,
@@ -156,7 +172,6 @@ pub(super) struct DetailApp {
     rendered_lines: Vec<Line<'static>>,
     images: Vec<ImagePlacement>,
     body_area: Rect,
-    image_loading: bool,
     generation: u64,
     sender: Sender<Completion>,
     receiver: Receiver<Completion>,
@@ -194,10 +209,7 @@ impl DetailApp {
             active_tab: 0,
             scroll: 0,
             body_height: 0,
-            loading_detail: false,
-            loading_patch: false,
-            loading_log: false,
-            mutation_loading: false,
+            loading: DetailLoadingState::default(),
             mode: Mode::Browse,
             notice: None,
             error: None,
@@ -206,7 +218,6 @@ impl DetailApp {
             rendered_lines: Vec::new(),
             images: Vec::new(),
             body_area: Rect::default(),
-            image_loading: false,
             generation: 0,
             sender,
             receiver,
@@ -226,17 +237,16 @@ impl DetailApp {
         app
     }
 
-    fn tabs(&self) -> &'static [Tab] {
+    const fn tabs(&self) -> &'static [Tab] {
         tabs_for(self.resource)
     }
 
-    fn tab_for_initial(&self, initial: InitialView) -> Tab {
+    const fn tab_for_initial(&self, initial: InitialView) -> Tab {
         match (self.resource, initial) {
-            (DetailResource::Issue(_), _) => Tab::Conversation,
             (DetailResource::Pull(_), InitialView::Files) => Tab::Files,
             (DetailResource::Pull(_), InitialView::Diff) => Tab::Diff,
             (DetailResource::Pull(_), InitialView::Checks) => Tab::Checks,
-            (DetailResource::Pull(_), _) => Tab::Conversation,
+            (DetailResource::Issue(_) | DetailResource::Pull(_), _) => Tab::Conversation,
             (DetailResource::Run(_), InitialView::Jobs) => Tab::Jobs,
             (DetailResource::Run(_), InitialView::Log | InitialView::FailedLog) => Tab::Log,
             (DetailResource::Run(_), _) => Tab::Overview,
@@ -248,12 +258,12 @@ impl DetailApp {
     }
 
     fn start_detail(&mut self) {
-        if self.loading_detail {
+        if self.loading.contains(Request::Detail) {
             return;
         }
         self.generation = self.generation.wrapping_add(1);
         let generation = self.generation;
-        self.loading_detail = true;
+        self.loading.start(Request::Detail);
         self.error = None;
         let repo = self.repo.clone();
         let resource = self.resource;
@@ -289,10 +299,10 @@ impl DetailApp {
         let DetailResource::Pull(number) = self.resource else {
             return;
         };
-        if self.loading_patch || self.patch.is_some() {
+        if self.loading.contains(Request::Patch) || self.patch.is_some() {
             return;
         }
-        self.loading_patch = true;
+        self.loading.start(Request::Patch);
         self.patch_error = None;
         let generation = self.generation;
         let repo = self.repo.clone();
@@ -312,7 +322,7 @@ impl DetailApp {
         let DetailResource::Run(run_id) = self.resource else {
             return;
         };
-        if self.loading_log
+        if self.loading.contains(Request::Log)
             || self
                 .log
                 .as_ref()
@@ -320,7 +330,7 @@ impl DetailApp {
         {
             return;
         }
-        self.loading_log = true;
+        self.loading.start(Request::Log);
         self.log_error = None;
         let generation = self.generation;
         let repo = self.repo.clone();
@@ -343,11 +353,11 @@ impl DetailApp {
     }
 
     fn start_mutation(&mut self, mutation: GitHubMutation) {
-        if self.mutation_loading {
+        if self.loading.contains(Request::Mutation) {
             return;
         }
         self.mode = Mode::Browse;
-        self.mutation_loading = true;
+        self.loading.start(Request::Mutation);
         self.notice = None;
         let generation = self.generation;
         let repo = self.repo.clone();
@@ -364,7 +374,7 @@ impl DetailApp {
     }
 
     fn start_compose(&mut self, kind: ComposeKind) {
-        if !self.mutation_loading {
+        if !self.loading.contains(Request::Mutation) {
             self.mode = Mode::Compose {
                 kind,
                 text: Vec::new(),
@@ -373,7 +383,7 @@ impl DetailApp {
     }
 
     fn confirm(&mut self, message: impl Into<String>, mutation: GitHubMutation) {
-        if !self.mutation_loading {
+        if !self.loading.contains(Request::Mutation) {
             self.mode = Mode::Confirm {
                 message: message.into(),
                 mutation,
@@ -601,13 +611,7 @@ impl DetailApp {
         if completion.generation != self.generation {
             return;
         }
-        match completion.request {
-            Request::Detail => self.loading_detail = false,
-            Request::Patch => self.loading_patch = false,
-            Request::Log => self.loading_log = false,
-            Request::Mutation => self.mutation_loading = false,
-            Request::ImageOpen => self.image_loading = false,
-        }
+        self.loading.finish(completion.request);
         // Image open only updates the footer notice; avoid rebuilding the page.
         if !matches!(completion.request, Request::ImageOpen) {
             self.content_revision = self.content_revision.wrapping_add(1);
@@ -667,7 +671,10 @@ impl DetailApp {
     fn open_image_at_line(&mut self, line: usize) {
         let Some(placement) = self.images.iter().find(|image| image.line == line).cloned() else {
             if !self.images.is_empty() {
-                self.set_notice("no image on this line — click a [image] row or press o", true);
+                self.set_notice(
+                    "no image on this line — click a [image] row or press o",
+                    true,
+                );
             }
             return;
         };
@@ -690,11 +697,11 @@ impl DetailApp {
     }
 
     fn open_image(&mut self, url: &str, alt: &str) {
-        if self.image_loading {
+        if self.loading.contains(Request::ImageOpen) {
             self.set_notice("image already opening…", true);
             return;
         }
-        self.image_loading = true;
+        self.loading.start(Request::ImageOpen);
         self.set_notice("downloading image…", false);
         let generation = self.generation;
         let url = url.to_string();
@@ -744,106 +751,91 @@ impl DetailApp {
         self.scroll = self.scroll.saturating_add_signed(delta).min(max);
     }
 
-    pub(super) fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers, line_count: usize) -> bool {
-        let Some(token) = config::key_token(code, mods) else {
-            return false;
-        };
-        let action = self
-            .config
-            .action_for_feature_key("github-detail", &token)
-            .map(str::to_string);
-
-        if self.mutation_loading {
-            return false;
-        }
-        if matches!(self.mode, Mode::Compose { .. }) {
-            match action.as_deref() {
-                Some(config::internal::GITHUB_SUBMIT) => self.submit_compose(),
-                Some(config::internal::GITHUB_CANCEL) => self.mode = Mode::Browse,
-                Some(config::internal::EDIT_BACKSPACE) => {
-                    if let Mode::Compose { text, .. } = &mut self.mode {
-                        text.pop();
+    fn handle_compose_key(&mut self, code: KeyCode, mods: KeyModifiers, action: Option<&str>) {
+        match action {
+            Some(config::internal::GITHUB_SUBMIT) => self.submit_compose(),
+            Some(config::internal::GITHUB_CANCEL) => self.mode = Mode::Browse,
+            Some(config::internal::EDIT_BACKSPACE) => {
+                if let Mode::Compose { text, .. } = &mut self.mode {
+                    text.pop();
+                }
+            }
+            _ if code == KeyCode::Enter => {
+                if let Mode::Compose { text, .. } = &mut self.mode {
+                    if text.len() < MAX_MESSAGE_CHARS {
+                        text.push('\n');
                     }
                 }
-                _ if code == KeyCode::Enter => {
-                    if let Mode::Compose { text, .. } = &mut self.mode {
-                        if text.len() < MAX_MESSAGE_CHARS {
-                            text.push('\n');
-                        }
-                    }
-                }
-                _ => {
-                    if let KeyCode::Char(ch) = code {
-                        if !mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
-                            if let Mode::Compose { text, .. } = &mut self.mode {
-                                if text.len() < MAX_MESSAGE_CHARS {
-                                    text.push(ch);
-                                }
+            }
+            _ => {
+                if let KeyCode::Char(ch) = code {
+                    if !mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+                        if let Mode::Compose { text, .. } = &mut self.mode {
+                            if text.len() < MAX_MESSAGE_CHARS {
+                                text.push(ch);
                             }
                         }
                     }
                 }
             }
-            return false;
         }
-        if matches!(self.mode, Mode::MergeMethod { .. }) {
-            match action.as_deref() {
-                Some(config::internal::UP) => {
-                    if let Mode::MergeMethod { selected, .. } = &mut self.mode {
-                        *selected = selected.saturating_sub(1);
-                    }
-                }
-                Some(config::internal::DOWN) => {
-                    if let Mode::MergeMethod { selected, .. } = &mut self.mode {
-                        *selected = (*selected + 1).min(MergeMethod::ALL.len() - 1);
-                    }
-                }
-                Some(config::internal::TOP) => {
-                    if let Mode::MergeMethod { selected, .. } = &mut self.mode {
-                        *selected = 0;
-                    }
-                }
-                Some(config::internal::BOTTOM) => {
-                    if let Mode::MergeMethod { selected, .. } = &mut self.mode {
-                        *selected = MergeMethod::ALL.len() - 1;
-                    }
-                }
-                Some(
-                    config::internal::TOGGLE
-                    | config::internal::OPEN
-                    | config::internal::GITHUB_VIEW
-                    | config::internal::GITHUB_MERGE
-                    | config::internal::GITHUB_CONFIRM,
-                ) => self.confirm_selected_merge(),
-                Some(config::internal::GITHUB_CANCEL) => self.mode = Mode::Browse,
-                _ => {
-                    if let KeyCode::Char(ch @ '1'..='3') = code {
-                        if let Mode::MergeMethod { selected, .. } = &mut self.mode {
-                            *selected = (ch as u8 - b'1') as usize;
-                        }
-                        self.confirm_selected_merge();
-                    }
-                }
-            }
-            return false;
-        }
-        if matches!(self.mode, Mode::Confirm { .. }) {
-            match action.as_deref() {
-                Some(config::internal::GITHUB_CONFIRM) => {
-                    let mode = std::mem::replace(&mut self.mode, Mode::Browse);
-                    if let Mode::Confirm { mutation, .. } = mode {
-                        self.start_mutation(mutation);
-                    }
-                }
-                Some(config::internal::GITHUB_CANCEL) => self.mode = Mode::Browse,
-                _ => {}
-            }
-            return false;
-        }
+    }
 
-        let Some(action) = action.as_deref() else {
-            return false;
-        };
+    fn handle_merge_method_key(&mut self, code: KeyCode, action: Option<&str>) {
+        match action {
+            Some(config::internal::UP) => {
+                if let Mode::MergeMethod { selected, .. } = &mut self.mode {
+                    *selected = selected.saturating_sub(1);
+                }
+            }
+            Some(config::internal::DOWN) => {
+                if let Mode::MergeMethod { selected, .. } = &mut self.mode {
+                    *selected = (*selected + 1).min(MergeMethod::ALL.len() - 1);
+                }
+            }
+            Some(config::internal::TOP) => {
+                if let Mode::MergeMethod { selected, .. } = &mut self.mode {
+                    *selected = 0;
+                }
+            }
+            Some(config::internal::BOTTOM) => {
+                if let Mode::MergeMethod { selected, .. } = &mut self.mode {
+                    *selected = MergeMethod::ALL.len() - 1;
+                }
+            }
+            Some(
+                config::internal::TOGGLE
+                | config::internal::OPEN
+                | config::internal::GITHUB_VIEW
+                | config::internal::GITHUB_MERGE
+                | config::internal::GITHUB_CONFIRM,
+            ) => self.confirm_selected_merge(),
+            Some(config::internal::GITHUB_CANCEL) => self.mode = Mode::Browse,
+            _ => {
+                if let KeyCode::Char(ch @ '1'..='3') = code {
+                    if let Mode::MergeMethod { selected, .. } = &mut self.mode {
+                        *selected = usize::from(ch as u8 - b'1');
+                    }
+                    self.confirm_selected_merge();
+                }
+            }
+        }
+    }
+
+    fn handle_confirm_key(&mut self, action: Option<&str>) {
+        match action {
+            Some(config::internal::GITHUB_CONFIRM) => {
+                let current_mode = std::mem::replace(&mut self.mode, Mode::Browse);
+                if let Mode::Confirm { mutation, .. } = current_mode {
+                    self.start_mutation(mutation);
+                }
+            }
+            Some(config::internal::GITHUB_CANCEL) => self.mode = Mode::Browse,
+            _ => {}
+        }
+    }
+
+    fn handle_browse_action(&mut self, action: &str, line_count: usize) -> bool {
         match action {
             config::internal::QUIT => return true,
             config::internal::UP => self.scroll_by(-1, line_count),
@@ -862,10 +854,10 @@ impl DetailApp {
             config::internal::EXPAND | config::internal::GITHUB_NEXT_SECTION => self.move_tab(1),
             config::internal::REFRESH => self.refresh(),
             config::internal::GITHUB_DIFF if matches!(self.resource, DetailResource::Pull(_)) => {
-                self.select_tab(Tab::Diff)
+                self.select_tab(Tab::Diff);
             }
             config::internal::GITHUB_CHECKS if matches!(self.resource, DetailResource::Pull(_)) => {
-                self.select_tab(Tab::Checks)
+                self.select_tab(Tab::Checks);
             }
             config::internal::GITHUB_LOG if matches!(self.resource, DetailResource::Run(_)) => {
                 self.select_tab(Tab::Log);
@@ -891,6 +883,42 @@ impl DetailApp {
         false
     }
 
+    pub(super) fn handle_key(
+        &mut self,
+        code: KeyCode,
+        mods: KeyModifiers,
+        line_count: usize,
+    ) -> bool {
+        let Some(token) = config::key_token(code, mods) else {
+            return false;
+        };
+        let action = self
+            .config
+            .action_for_feature_key("github-detail", &token)
+            .map(str::to_string);
+
+        if self.loading.contains(Request::Mutation) {
+            return false;
+        }
+        if matches!(self.mode, Mode::Compose { .. }) {
+            self.handle_compose_key(code, mods, action.as_deref());
+            return false;
+        }
+        if matches!(self.mode, Mode::MergeMethod { .. }) {
+            self.handle_merge_method_key(code, action.as_deref());
+            return false;
+        }
+        if matches!(self.mode, Mode::Confirm { .. }) {
+            self.handle_confirm_key(action.as_deref());
+            return false;
+        }
+
+        let Some(action) = action.as_deref() else {
+            return false;
+        };
+        self.handle_browse_action(action, line_count)
+    }
+
     fn title_parts(&self) -> (String, String) {
         match &self.detail {
             Some(Detail::Issue(issue)) => (format!("#{}", issue.number), issue.title.clone()),
@@ -913,6 +941,40 @@ impl DetailApp {
             Some(Detail::Run(run)) => &run.conclusion,
             None => "LOADING",
         }
+    }
+
+    fn diff_tab_lines(&self, width: usize, palette: &Palette) -> Vec<Line<'static>> {
+        self.patch_error.as_ref().map_or_else(
+            || {
+                self.patch.as_ref().map_or_else(
+                    || {
+                        vec![Line::styled(
+                            "Loading diff…",
+                            Style::default().fg(palette.accent),
+                        )]
+                    },
+                    |patch| patch_lines(patch, width, palette),
+                )
+            },
+            |error| styled_text(error, width, Style::default().fg(palette.red)),
+        )
+    }
+
+    fn log_tab_lines(&self, width: usize, palette: &Palette) -> Vec<Line<'static>> {
+        self.log_error.as_ref().map_or_else(
+            || {
+                self.log.as_ref().map_or_else(
+                    || {
+                        vec![Line::styled(
+                            "Loading log…",
+                            Style::default().fg(palette.accent),
+                        )]
+                    },
+                    |(log, _)| log_lines(log, width, palette),
+                )
+            },
+            |error| styled_text(error, width, Style::default().fg(palette.red)),
+        )
     }
 
     fn build_lines(
@@ -941,41 +1003,13 @@ impl DetailApp {
             (Detail::Issue(issue), _) => issue_page(issue, width, palette),
             (Detail::Pull(pull), Tab::Conversation) => pull_page(pull, width, palette),
             (Detail::Pull(pull), Tab::Files) => plain(pull_files(pull, palette)),
-            (Detail::Pull(_), Tab::Diff) => plain({
-                if let Some(error) = &self.patch_error {
-                    styled_text(error, width, Style::default().fg(palette.red))
-                } else {
-                    self.patch.as_ref().map_or_else(
-                        || {
-                            vec![Line::styled(
-                                "Loading diff…",
-                                Style::default().fg(palette.accent),
-                            )]
-                        },
-                        |patch| patch_lines(patch, width, palette),
-                    )
-                }
-            }),
+            (Detail::Pull(_), Tab::Diff) => plain(self.diff_tab_lines(width, palette)),
             (Detail::Pull(pull), Tab::Checks) => {
                 plain(check_lines(&pull.status_check_rollup, palette))
             }
             (Detail::Run(run), Tab::Overview) => plain(run_overview(run, width, palette)),
             (Detail::Run(run), Tab::Jobs) => plain(run_jobs(run, palette)),
-            (Detail::Run(_), Tab::Log) => plain({
-                if let Some(error) = &self.log_error {
-                    styled_text(error, width, Style::default().fg(palette.red))
-                } else {
-                    self.log.as_ref().map_or_else(
-                        || {
-                            vec![Line::styled(
-                                "Loading log…",
-                                Style::default().fg(palette.accent),
-                            )]
-                        },
-                        |(log, _)| log_lines(log, width, palette),
-                    )
-                }
-            }),
+            (Detail::Run(_), Tab::Log) => plain(self.log_tab_lines(width, palette)),
             _ => plain(vec![Line::styled(
                 "Not available",
                 Style::default().fg(palette.overlay1),
@@ -983,27 +1017,17 @@ impl DetailApp {
         }
     }
 
-    fn draw(&mut self, frame: &mut Frame, palette: &Palette) -> usize {
-        let area = frame.area();
-        if area.height == 0 {
-            return 0;
-        }
-        // Reset the whole area's background every frame. Fenced code-block cells
-        // still set bg = surface0; blank/short rows never overwrite those cells,
-        // so without a full-area reset scrolling can smear leftover blocks.
-        // Color::Reset (not a themed fill) keeps the body transparent as before.
-        frame.render_widget(
-            Block::default().style(Style::default().bg(Color::Reset)),
-            area,
-        );
-        // Badge-style header: number pill + title, state pill on the right.
+    fn draw_header(&self, frame: &mut Frame, area: Rect, palette: &Palette) {
         let (number, title) = self.title_parts();
         let number_badge = format!(" {number} ");
         let state = self.state().to_ascii_uppercase();
         let state_badge = format!(" {state} ");
-        let number_width = (number_badge.chars().count() as u16).min(area.width);
-        let state_width =
-            (state_badge.chars().count() as u16).min(area.width.saturating_sub(number_width));
+        let number_width = u16::try_from(number_badge.chars().count())
+            .unwrap_or(u16::MAX)
+            .min(area.width);
+        let state_width = u16::try_from(state_badge.chars().count())
+            .unwrap_or(u16::MAX)
+            .min(area.width.saturating_sub(number_width));
         let title_width = area
             .width
             .saturating_sub(number_width.saturating_add(state_width).saturating_add(1));
@@ -1051,10 +1075,9 @@ impl DetailApp {
                 },
             );
         }
+    }
 
-        if area.height < 2 {
-            return 0;
-        }
+    fn draw_tabs(&self, frame: &mut Frame, area: Rect, palette: &Palette) {
         let mut spans = Vec::new();
         for (index, tab) in self.tabs().iter().enumerate() {
             if index > 0 {
@@ -1077,79 +1100,49 @@ impl DetailApp {
                 ..area
             },
         );
+    }
 
-        let footer_height = u16::from(area.height >= 4);
-        let body = Rect {
-            x: area.x,
-            y: area.y + 2,
-            width: area.width,
-            height: area.height.saturating_sub(2 + footer_height),
-        };
-        self.body_height = body.height;
-        self.body_area = body;
-        let render_key = (self.active_tab(), body.width, self.content_revision);
-        if self.rendered_key != Some(render_key) {
-            let (lines, images) = self.build_lines(body.width, palette);
-            self.rendered_lines = lines;
-            self.images = images;
-            self.rendered_key = Some(render_key);
-        }
-        let max_scroll = self
-            .rendered_lines
-            .len()
-            .saturating_sub(usize::from(body.height.max(1)));
-        self.scroll = self.scroll.min(max_scroll);
-        frame.render_widget(
-            Paragraph::new(
-                self.rendered_lines
-                    .iter()
-                    .skip(self.scroll)
-                    .cloned()
-                    .collect::<Vec<_>>(),
-            ),
-            body,
-        );
-
-        if footer_height == 1 {
-            let hints = if self.mutation_loading {
-                "working…".to_string()
-            } else if self.image_loading {
-                "downloading image…".to_string()
-            } else if let Some((message, _, _)) = &self.notice {
-                message.clone()
-            } else {
-                match self.resource {
-                    DetailResource::Issue(_) => {
-                        "c reply  o image  x close/reopen  h/l tabs  r refresh  q back".into()
-                    }
-                    DetailResource::Pull(_) => {
-                        "c reply  o image  a approve  x changes  m merge  D close  d diff".into()
-                    }
-                    DetailResource::Run(_) => {
-                        "x cancel  R failed  A rerun all  f/L logs  h/l tabs".into()
-                    }
+    fn draw_footer(&self, frame: &mut Frame, area: Rect, palette: &Palette) {
+        let hints = if self.loading.contains(Request::Mutation) {
+            "working…".to_string()
+        } else if self.loading.contains(Request::ImageOpen) {
+            "downloading image…".to_string()
+        } else if let Some((message, _, _)) = &self.notice {
+            message.clone()
+        } else {
+            match self.resource {
+                DetailResource::Issue(_) => {
+                    "c reply  o image  x close/reopen  h/l tabs  r refresh  q back".into()
                 }
-            };
-            let color = self
-                .notice
-                .as_ref()
-                .map_or(palette.overlay1, |(_, error, _)| {
-                    if *error {
-                        palette.red
-                    } else {
-                        palette.green
-                    }
-                });
-            frame.render_widget(
-                Paragraph::new(hints).style(Style::default().fg(color)),
-                Rect {
-                    y: area.y + area.height - 1,
-                    height: 1,
-                    ..area
-                },
-            );
-        }
+                DetailResource::Pull(_) => {
+                    "c reply  o image  a approve  x changes  m merge  D close  d diff".into()
+                }
+                DetailResource::Run(_) => {
+                    "x cancel  R failed  A rerun all  f/L logs  h/l tabs".into()
+                }
+            }
+        };
+        let color = self
+            .notice
+            .as_ref()
+            .map_or(palette.overlay1, |(_, error, _)| {
+                if *error {
+                    palette.red
+                } else {
+                    palette.green
+                }
+            });
+        frame.render_widget(
+            Paragraph::new(hints).style(Style::default().fg(color)),
+            Rect {
+                y: area.y + area.height - 1,
+                height: 1,
+                ..area
+            },
+        );
+    }
 
+    fn draw_modals(&self, frame: &mut Frame, area: Rect, palette: &Palette) {
         match &self.mode {
             Mode::Browse => {}
             Mode::MergeMethod {
@@ -1248,10 +1241,70 @@ impl DetailApp {
                 );
             }
         }
+    }
+
+    fn draw(&mut self, frame: &mut Frame, palette: &Palette) -> usize {
+        let area = frame.area();
+        if area.height == 0 {
+            return 0;
+        }
+        frame.render_widget(
+            Block::default().style(Style::default().bg(Color::Reset)),
+            area,
+        );
+        self.draw_header(frame, area, palette);
+
+        if area.height < 2 {
+            return 0;
+        }
+        self.draw_tabs(frame, area, palette);
+
+        let footer_height = u16::from(area.height >= 4);
+        let body = Rect {
+            x: area.x,
+            y: area.y + 2,
+            width: area.width,
+            height: area.height.saturating_sub(2 + footer_height),
+        };
+        self.body_height = body.height;
+        self.body_area = body;
+        let render_key = (self.active_tab(), body.width, self.content_revision);
+        if self.rendered_key != Some(render_key) {
+            let (lines, images) = self.build_lines(body.width, palette);
+            self.rendered_lines = lines;
+            self.images = images;
+            self.rendered_key = Some(render_key);
+        }
+        let max_scroll = self
+            .rendered_lines
+            .len()
+            .saturating_sub(usize::from(body.height.max(1)));
+        self.scroll = self.scroll.min(max_scroll);
+        frame.render_widget(
+            Paragraph::new(
+                self.rendered_lines
+                    .iter()
+                    .skip(self.scroll)
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            ),
+            body,
+        );
+
+        if footer_height == 1 {
+            self.draw_footer(frame, area, palette);
+        }
+
+        self.draw_modals(frame, area, palette);
         self.rendered_lines.len()
     }
 }
 
+/// Run the GitHub detail standalone / side-pane viewer.
+///
+/// # Errors
+///
+/// Returns an [`io::Error`] if terminal initialization, event polling, or restore fails.
 pub fn run(repo: String, resource: DetailResource, initial: InitialView) -> io::Result<()> {
     let palette = Palette::resolve();
     let config = Arc::new(Config::load());
@@ -1339,7 +1392,7 @@ impl Drop for DetailTerminal {
     }
 }
 
-pub(super) fn tabs_for(resource: DetailResource) -> &'static [Tab] {
+pub(super) const fn tabs_for(resource: DetailResource) -> &'static [Tab] {
     match resource {
         // Issue/PR overview and comments now live on one scrollable page.
         DetailResource::Issue(_) => &[Tab::Conversation],
@@ -1347,4 +1400,3 @@ pub(super) fn tabs_for(resource: DetailResource) -> &'static [Tab] {
         DetailResource::Run(_) => &[Tab::Overview, Tab::Jobs, Tab::Log],
     }
 }
-

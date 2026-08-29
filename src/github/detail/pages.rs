@@ -9,11 +9,11 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use serde_json::Value;
 
-pub(crate) fn metadata_line(parts: &[String], palette: &Palette) -> Line<'static> {
+pub fn metadata_line(parts: &[String], palette: &Palette) -> Line<'static> {
     Line::styled(parts.join("  ·  "), Style::default().fg(palette.subtext0))
 }
 
-pub(crate) fn comment_header(login: &str, timestamp: &str, palette: &Palette) -> Line<'static> {
+pub fn comment_header(login: &str, timestamp: &str, palette: &Palette) -> Line<'static> {
     Line::from(vec![
         Span::styled(
             login.to_string(),
@@ -29,7 +29,7 @@ pub(crate) fn comment_header(login: &str, timestamp: &str, palette: &Palette) ->
 }
 
 /// Issue overview + all comments on one scrollable page.
-pub(crate) fn issue_page(
+pub fn issue_page(
     issue: &IssueDetail,
     width: usize,
     palette: &Palette,
@@ -70,7 +70,7 @@ pub(crate) fn issue_page(
 }
 
 /// PR overview + conversation + reviews on one scrollable page.
-pub(crate) fn pull_page(
+pub fn pull_page(
     pull: &PullRequestDetail,
     width: usize,
     palette: &Palette,
@@ -118,7 +118,7 @@ pub(crate) fn pull_page(
     page.into_parts()
 }
 
-pub(crate) fn review_header(review: &Review, palette: &Palette) -> Line<'static> {
+pub fn review_header(review: &Review, palette: &Palette) -> Line<'static> {
     Line::from(vec![
         Span::styled(
             actor(review.author.as_ref()).to_string(),
@@ -138,7 +138,7 @@ pub(crate) fn review_header(review: &Review, palette: &Palette) -> Line<'static>
     ])
 }
 
-pub(crate) fn pull_files(pull: &PullRequestDetail, palette: &Palette) -> Vec<Line<'static>> {
+pub fn pull_files(pull: &PullRequestDetail, palette: &Palette) -> Vec<Line<'static>> {
     if pull.files.is_empty() {
         return vec![Line::styled(
             "No changed files",
@@ -163,7 +163,7 @@ pub(crate) fn pull_files(pull: &PullRequestDetail, palette: &Palette) -> Vec<Lin
         .collect()
 }
 
-pub(crate) fn patch_lines(patch: &str, width: usize, palette: &Palette) -> Vec<Line<'static>> {
+pub fn patch_lines(patch: &str, width: usize, palette: &Palette) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     for raw in patch.lines() {
         let style =
@@ -187,7 +187,7 @@ pub(crate) fn patch_lines(patch: &str, width: usize, palette: &Palette) -> Vec<L
     lines
 }
 
-pub(crate) fn check_lines(checks: &Value, palette: &Palette) -> Vec<Line<'static>> {
+pub fn check_lines(checks: &Value, palette: &Palette) -> Vec<Line<'static>> {
     let Some(checks) = checks.as_array() else {
         return vec![Line::styled(
             "No checks",
@@ -231,7 +231,11 @@ pub(crate) fn check_lines(checks: &Value, palette: &Palette) -> Vec<Line<'static
         .collect()
 }
 
-pub(crate) fn run_overview(run: &WorkflowRunDetail, width: usize, palette: &Palette) -> Vec<Line<'static>> {
+pub fn run_overview(
+    run: &WorkflowRunDetail,
+    width: usize,
+    palette: &Palette,
+) -> Vec<Line<'static>> {
     let mut lines = vec![
         metadata_line(
             &[
@@ -264,7 +268,7 @@ pub(crate) fn run_overview(run: &WorkflowRunDetail, width: usize, palette: &Pale
     lines
 }
 
-pub(crate) fn run_jobs(run: &WorkflowRunDetail, palette: &Palette) -> Vec<Line<'static>> {
+pub fn run_jobs(run: &WorkflowRunDetail, palette: &Palette) -> Vec<Line<'static>> {
     if run.jobs.is_empty() {
         return vec![Line::styled(
             "No jobs",
@@ -322,7 +326,7 @@ pub(crate) fn run_jobs(run: &WorkflowRunDetail, palette: &Palette) -> Vec<Line<'
     lines
 }
 
-pub(crate) fn log_lines(log: &str, width: usize, palette: &Palette) -> Vec<Line<'static>> {
+pub fn log_lines(log: &str, width: usize, palette: &Palette) -> Vec<Line<'static>> {
     log.lines()
         .flat_map(|raw| {
             let lower = raw.to_ascii_lowercase();
@@ -339,4 +343,3 @@ pub(crate) fn log_lines(log: &str, width: usize, palette: &Palette) -> Vec<Line<
         })
         .collect()
 }
-

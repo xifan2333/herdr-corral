@@ -29,7 +29,11 @@ pub use host::{LaunchContext, Mode};
 pub use ui::{has_nerd_font, NerdFontSupport, Palette};
 
 /// Entry point invoked by the binary (plugin pane or standalone).
+///
+/// # Errors
+///
+/// Returns an [`std::io::Error`] if terminal initialization, event polling, or restore fails.
 pub fn run() -> std::io::Result<()> {
     let ctx = host::from_env();
-    app::run(ctx)
+    app::run(&ctx)
 }
