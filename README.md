@@ -39,34 +39,35 @@ corral-github issue --repo owner/repo 123
 在 Herdr 或 WezTerm 中，SCM diff 会打开到复用的 Neovim terminal buffer，
 并停留在 Normal mode，方便直接搜索、复制和滚动。默认使用 `delta` 渲染；
 可在 Neovim 配置中加入以下映射，让 `.` / `,` 跳到下一处 / 上一处变更，
-并在打开后自动跳到第一处变更：
+并在打开后自动跳到第一处变更。完整可复制版本见
+[`examples/nvim-corral.lua`](examples/nvim-corral.lua)：
 
 ```lua
--- Diff review in terminal buffers: ,/. to jump across changes, auto-jump on open
+-- Diff review in terminal buffers: ,/. to jump across changes, auto-jump on open.
+local pat = [[\v(^\s*\d+\s*⋮\s*│|^\s*⋮\s*\d+\s*│|^\s*\d+\s*[-+])]]
+local grp = vim.api.nvim_create_augroup("CorralDiffReview", { clear = true })
+
 vim.api.nvim_create_autocmd("TermOpen", {
+  group = grp,
   callback = function(ev)
-    local pat = [[\v(^\s*\d+\s*⋮\s*│|^\s*⋮\s*\d+\s*│|^\s*\d+\s*[-+])]]
-
-    vim.keymap.set("n", ".", function()
-      vim.fn.search(pat, "W")
-    end, { buffer = ev.buf, desc = "Next diff change", silent = true })
-
-    vim.keymap.set("n", ",", function()
-      vim.fn.search(pat, "bW")
-    end, { buffer = ev.buf, desc = "Previous diff change", silent = true })
-
     vim.defer_fn(function()
-      if vim.api.nvim_buf_is_valid(ev.buf) then
-        pcall(vim.fn.search, pat, "W")
-      end
-    end, 120)
+      if not vim.b[ev.buf].corral_preview then return end
+      vim.keymap.set("n", ".", function() vim.fn.search(pat, "W") end,
+        { buffer = ev.buf, desc = "Next diff change", silent = true })
+      vim.keymap.set("n", ",", function() vim.fn.search(pat, "bW") end,
+        { buffer = ev.buf, desc = "Previous diff change", silent = true })
+      vim.defer_fn(function()
+        if vim.api.nvim_buf_is_valid(ev.buf) then pcall(vim.fn.search, pat, "W") end
+      end, 120)
+    end, 20)
   end,
 })
 ```
 
 例如可放在 `~/.config/nvim/lua/config/keymaps.lua` 或直接放入
-`init.lua`。GitHub detail 属于交互式 TUI，会自动进入 terminal-input mode，
-不受以上 Normal-mode diff 浏览方式影响。
+`init.lua`；也可以复制参考文件到 `lua/config/corral.lua` 并在配置中调用
+`require("config.corral")`。GitHub detail 属于交互式 TUI，会自动进入
+terminal-input mode，不受以上 Normal-mode diff 浏览方式影响。
 
 ## 快捷键
 

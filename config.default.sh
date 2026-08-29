@@ -338,6 +338,12 @@ _corral_run_wezterm() {
     rm -f -- "$script"
     return 1
   fi
+  sleep 0.05
+  # Exit terminal mode (C-\ C-n) and mark the buffer so Neovim config can
+  # scope diff-review keymaps to Corral previews only. Re-enter insert when
+  # the caller asked for terminal input.
+  wezterm cli send-text --pane-id "$pid" --no-paste $'\x1c\x0e' >/dev/null 2>&1 || true
+  wezterm cli send-text --pane-id "$pid" --no-paste ':let b:corral_preview = 1'$'\r' >/dev/null 2>&1 || true
   if [[ "$input_mode" == terminal ]]; then
     sleep 0.05
     wezterm cli send-text --pane-id "$pid" --no-paste 'i' >/dev/null 2>&1 || true
@@ -417,6 +423,9 @@ _corral_run() {
   chmod 700 "$script" || { rm -f -- "$script"; return 1; }
   vim_path="$(printf '%s' "$script" | jq -Rs .)" || { rm -f -- "$script"; return 1; }
   expr="execute('if &buftype ==# ''terminal'' | bwipeout! | endif | enew | setlocal nonumber norelativenumber signcolumn=no foldcolumn=0 wrap | terminal ' . fnameescape($vim_path)) . execute('setlocal wrap') . execute('call winrestview({''leftcol'': 0})')"
+  # Mark the buffer so Neovim config applies diff-review keymaps only to
+  # Corral previews, never to a terminal the user opens manually.
+  expr+=" . execute('let b:corral_preview = 1')"
   if [[ "$input_mode" == terminal ]]; then
     expr+=" . execute('startinsert')"
   fi
