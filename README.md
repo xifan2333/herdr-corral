@@ -24,7 +24,8 @@ corral-github issue --repo owner/repo 123
 ## 配置
 
 所有快捷键定义在 `~/.config/corral/config.sh`（首次启动自动 seed，
-模板见 [`config.default.sh`](config.default.sh)）。
+模板见 [`config.default.sh`](config.default.sh)）。已有配置不会被自动迁移或覆盖；
+如需恢复最新默认配置，删除该文件后重新启动 Corral。
 
 语法：`corral bind <key> <action>`
 
@@ -32,6 +33,40 @@ corral-github issue --repo owner/repo 123
 
 依赖 [GitHub CLI](https://cli.github.com/) `gh`；图片用默认 `imv` 打开，
 可通过 `CORRAL_GITHUB_IMAGE_VIEWER` 覆盖。
+
+### Neovim Diff 浏览
+
+在 Herdr 或 WezTerm 中，SCM diff 会打开到复用的 Neovim terminal buffer，
+并停留在 Normal mode，方便直接搜索、复制和滚动。默认使用 `delta` 渲染；
+可在 Neovim 配置中加入以下映射，让 `.` / `,` 跳到下一处 / 上一处变更，
+并在打开后自动跳到第一处变更：
+
+```lua
+-- Diff review in terminal buffers: ,/. to jump across changes, auto-jump on open
+vim.api.nvim_create_autocmd("TermOpen", {
+  callback = function(ev)
+    local pat = [[\v(^\s*\d+\s*⋮\s*│|^\s*⋮\s*\d+\s*│|^\s*\d+\s*[-+])]]
+
+    vim.keymap.set("n", ".", function()
+      vim.fn.search(pat, "W")
+    end, { buffer = ev.buf, desc = "Next diff change", silent = true })
+
+    vim.keymap.set("n", ",", function()
+      vim.fn.search(pat, "bW")
+    end, { buffer = ev.buf, desc = "Previous diff change", silent = true })
+
+    vim.defer_fn(function()
+      if vim.api.nvim_buf_is_valid(ev.buf) then
+        pcall(vim.fn.search, pat, "W")
+      end
+    end, 120)
+  end,
+})
+```
+
+例如可放在 `~/.config/nvim/lua/config/keymaps.lua` 或直接放入
+`init.lua`。GitHub detail 属于交互式 TUI，会自动进入 terminal-input mode，
+不受以上 Normal-mode diff 浏览方式影响。
 
 ## 快捷键
 

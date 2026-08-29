@@ -4,9 +4,8 @@
 #   ${XDG_CONFIG_HOME:-~/.config}/corral/config.sh
 # Edit THAT file — one path for Herdr plugin and standalone. Host differences
 # are detected in shell via $HERDR_ENV / $HERDR_BIN_PATH (see open(), github_detail).
-# Future migrations use this in-place version and preserve customized
-# bindings/functions.
-CORRAL_CONFIG_VERSION=16
+# Existing configs are never rewritten automatically. Delete config.sh to seed
+# a fresh copy of this template on the next launch.
 #
 # River-style: call `corral bind <key> <action>` (like `riverctl map …`).
 #   global actions: quit feature-explorer feature-scm feature-github
@@ -240,7 +239,7 @@ _corral_ensure_nvim() {
   return 1
 }
 
-# CORRAL_MIGRATION_V15_FUNCTION_BEGIN
+# CORRAL_WEZTERM_PREVIEW_HELPERS_BEGIN
 # WezTerm side-pane helpers. Prefer one reused nvim pane for open + previews
 # (:edit / :terminal). If the target pane is not nvim, start one.
 _corral_wezterm_pane_title() {
@@ -312,7 +311,7 @@ _corral_wezterm_ensure_nvim() {
 # Write cmd to a private script and run it via nvim :terminal in the wezterm
 # side pane. Hosted corral has no TTY, so less/corral-github must not eval here.
 _corral_run_wezterm() {
-  local cmd="$1" pid runtime script qscript
+  local cmd="$1" input_mode="${2:-normal}" pid runtime script qscript
   pid="$(_corral_wezterm_pane)" || return 1
   pid="$(_corral_wezterm_ensure_nvim "$pid")" || return 1
   runtime="$(_corral_runtime_dir)" || return 1
@@ -338,27 +337,30 @@ _corral_run_wezterm() {
     rm -f -- "$script"
     return 1
   fi
-  sleep 0.05
-  wezterm cli send-text --pane-id "$pid" --no-paste 'i' >/dev/null 2>&1 || true
+  if [[ "$input_mode" == terminal ]]; then
+    sleep 0.05
+    wezterm cli send-text --pane-id "$pid" --no-paste 'i' >/dev/null 2>&1 || true
+  fi
 }
 
-# Dispatch a preview/pager command to the right host surface.
+# Dispatch a preview/pager command to the right host surface. Hosted previews
+# stay in nvim Normal mode unless the caller explicitly requests terminal input.
 _corral_preview() {
-  local cmd="$1"
+  local cmd="$1" input_mode="${2:-normal}"
   if [[ -n "${HERDR_BIN_PATH:-}" && -n "${HERDR_ENV:-}" ]]; then
     echo CORRAL_SUSPEND=0
-    _corral_run "$cmd"
+    _corral_run "$cmd" "$input_mode"
     return $?
   fi
   if [[ -n "${WEZTERM_PANE:-}" ]] && command -v wezterm >/dev/null 2>&1; then
     echo CORRAL_SUSPEND=0
-    _corral_run_wezterm "$cmd"
+    _corral_run_wezterm "$cmd" "$input_mode"
     return $?
   fi
   echo CORRAL_SUSPEND=1
   eval "$cmd"
 }
-# CORRAL_MIGRATION_V15_FUNCTION_END
+# CORRAL_WEZTERM_PREVIEW_HELPERS_END
 
 open() {
   local file="${1:-${CORRAL_FILE:-}}"
@@ -400,7 +402,7 @@ open() {
 # nvim pane. The command is stored in a private temporary script, so neither
 # shell syntax nor filenames are injected as nvim keystrokes/Ex source.
 _corral_run() {
-  local cmd="$1" endpoint pid socket nvim runtime script vim_path expr
+  local cmd="$1" input_mode="${2:-normal}" endpoint pid socket nvim runtime script vim_path expr
   endpoint="$(_corral_ensure_nvim)" || return 1
   IFS=$'\t' read -r pid socket nvim <<<"$endpoint"
   runtime="$(_corral_runtime_dir)" || return 1
@@ -413,7 +415,10 @@ _corral_run() {
   } >"$script" || { rm -f -- "$script"; return 1; }
   chmod 700 "$script" || { rm -f -- "$script"; return 1; }
   vim_path="$(printf '%s' "$script" | jq -Rs .)" || { rm -f -- "$script"; return 1; }
-  expr="execute('if &buftype ==# ''terminal'' | bwipeout! | endif | enew | setlocal nonumber norelativenumber signcolumn=no foldcolumn=0 wrap | terminal ' . fnameescape($vim_path)) . execute('setlocal wrap') . execute('call winrestview({''leftcol'': 0})') . execute('startinsert')"
+  expr="execute('if &buftype ==# ''terminal'' | bwipeout! | endif | enew | setlocal nonumber norelativenumber signcolumn=no foldcolumn=0 wrap | terminal ' . fnameescape($vim_path)) . execute('setlocal wrap') . execute('call winrestview({''leftcol'': 0})')"
+  if [[ "$input_mode" == terminal ]]; then
+    expr+=" . execute('startinsert')"
+  fi
   if ! "$nvim" --server "$socket" --remote-expr "$expr" >/dev/null 2>&1; then
     rm -f -- "$script"
     return 1
@@ -554,7 +559,7 @@ open_worktree() {
   open "$path"
 }
 
-# CORRAL_MIGRATION_V6_FUNCTION_BEGIN
+# CORRAL_GITHUB_PREVIEW_BEGIN
 # GitHub's long-form views share the owner-scoped nvim pane with Explorer and
 # SCM. Identifiers arrive as structured env, are validated, and are shell-quoted
 # before entering the private preview script.
@@ -602,11 +607,11 @@ github_preview() {
       ;;
     *) return 1 ;;
   esac
-  _corral_preview "$cmd"
+  _corral_preview "$cmd" terminal
 }
-# CORRAL_MIGRATION_V6_FUNCTION_END
+# CORRAL_GITHUB_PREVIEW_END
 
-# CORRAL_MIGRATION_V8_FUNCTION_BEGIN
+# CORRAL_GITHUB_DETAIL_BEGIN
 # Open the independent full-width GitHub client in the same owner-scoped nvim
 # terminal used by Explorer and SCM previews.
 # Images are rendered as text links; click (or press o) downloads the file and
@@ -644,9 +649,9 @@ github_detail() {
   qviewer=$(printf '%q' "${CORRAL_GITHUB_IMAGE_VIEWER:-imv}")
   printf -v cmd 'exec env CORRAL_GITHUB_IMAGE_VIEWER=%s %s %s --repo %s %s --view %s' \
     "$qviewer" "$qbin" "$resource" "$qrepo" "$id" "$view"
-  _corral_preview "$cmd"
+  _corral_preview "$cmd" terminal
 }
-# CORRAL_MIGRATION_V8_FUNCTION_END
+# CORRAL_GITHUB_DETAIL_END
 
 # Optional intelligent commit-message provider. Corral appends one prompt
 # argument containing instructions, changed files, and the bounded Git diff.

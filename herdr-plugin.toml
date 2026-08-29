@@ -1,6 +1,6 @@
 id = "corral"
 name = "Corral"
-version = "0.1.7"
+version = "0.1.8"
 min_herdr_version = "0.7.0"
 description = "VS Code-style left sidebar: Explorer / SCM / GitHub for Herdr"
 platforms = ["linux"]
