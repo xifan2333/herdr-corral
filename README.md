@@ -38,12 +38,12 @@ corral-github issue --repo owner/repo 123
 
 在 Herdr 或 WezTerm 中，SCM diff 会打开到复用的 Neovim terminal buffer，
 并停留在 Normal mode，方便直接搜索、复制和滚动。默认使用 `delta` 渲染；
-可在 Neovim 配置中加入以下映射，让 `.` / `,` 跳到下一处 / 上一处变更，
-并在打开后自动跳到第一处变更。完整可复制版本见
+可在 Neovim 配置中加入以下映射，用 `←` / `→` 跳到上一处 / 下一处变更，
+并在打开后自动跳到第一处变更（`j` / `k` 仍用于逐行滚动）。完整可复制版本见
 [`examples/nvim-corral.lua`](examples/nvim-corral.lua)：
 
 ```lua
--- Diff review in terminal buffers: ,/. to jump across changes, auto-jump on open.
+-- Diff review in terminal buffers: ←/→ to jump across changes, auto-jump on open.
 local pat = [[\v(^\s*\d+\s*⋮\s*│|^\s*⋮\s*\d+\s*│|^\s*\d+\s*[-+])]]
 local grp = vim.api.nvim_create_augroup("CorralDiffReview", { clear = true })
 
@@ -52,9 +52,9 @@ vim.api.nvim_create_autocmd("TermOpen", {
   callback = function(ev)
     vim.defer_fn(function()
       if not vim.b[ev.buf].corral_preview then return end
-      vim.keymap.set("n", ".", function() vim.fn.search(pat, "W") end,
+      vim.keymap.set("n", "<Right>", function() vim.fn.search(pat, "W") end,
         { buffer = ev.buf, desc = "Next diff change", silent = true })
-      vim.keymap.set("n", ",", function() vim.fn.search(pat, "bW") end,
+      vim.keymap.set("n", "<Left>", function() vim.fn.search(pat, "bW") end,
         { buffer = ev.buf, desc = "Previous diff change", silent = true })
       vim.defer_fn(function()
         if vim.api.nvim_buf_is_valid(ev.buf) then pcall(vim.fn.search, pat, "W") end
