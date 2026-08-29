@@ -149,3 +149,14 @@ export PATH="$PWD/target/release:$PATH"
 herdr plugin link .
 herdr plugin action invoke corral.open
 ```
+
+提交前运行与 CI 相同的检查：
+
+```bash
+cargo fmt --all --check
+cargo clippy --all-targets --locked
+cargo test --all-targets --locked
+cargo test --doc --locked
+bash -n config.default.sh scripts/*.sh
+shellcheck config.default.sh scripts/*.sh
+```
