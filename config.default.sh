@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Corral default config (shell). Shipped with the plugin as config.default.sh.
 #
 # On first run Corral copies this to the single editable config:
@@ -318,7 +319,7 @@ _corral_run_wezterm() {
   script="$(mktemp "$runtime/preview.XXXXXX")" || return 1
   {
     printf '#!/usr/bin/env bash\n'
-    printf 'trap '\''rm -f -- "$0"'\'' EXIT\n'
+    printf "trap 'rm -f -- \"\$0\"' EXIT\n"
     printf 'set -o pipefail\n'
     printf '%s\n' "$cmd"
   } >"$script" || { rm -f -- "$script"; return 1; }
@@ -365,8 +366,9 @@ _corral_preview() {
 open() {
   local file="${1:-${CORRAL_FILE:-}}"
   [[ -n "$file" && -e "$file" ]] || return 1
-  local editor="${EDITOR:-${VISUAL:-vi}}" qfile vfile
-  qfile=$(printf '%q' "$file")
+  local editor="${EDITOR:-${VISUAL:-vi}}" vfile
+  local -a editor_cmd
+  read -r -a editor_cmd <<<"$editor"
   vfile=${file// /\\ }
 
   # --- herdr ---
@@ -394,8 +396,7 @@ open() {
   fi
 
   echo CORRAL_SUSPEND=1
-  # shellcheck disable=SC2086
-  exec $editor "$file"
+  exec "${editor_cmd[@]}" "$file"
 }
 
 # Run a generated preview command in a terminal buffer inside the SAME owned
@@ -409,7 +410,7 @@ _corral_run() {
   script="$(mktemp "$runtime/preview.XXXXXX")" || return 1
   {
     printf '#!/usr/bin/env bash\n'
-    printf 'trap '\''rm -f -- "$0"'\'' EXIT\n'
+    printf "trap 'rm -f -- \"\$0\"' EXIT\n"
     printf 'set -o pipefail\n'
     printf '%s\n' "$cmd"
   } >"$script" || { rm -f -- "$script"; return 1; }
@@ -566,7 +567,7 @@ open_worktree() {
 github_preview() {
   local kind="${CORRAL_GITHUB_KIND:-}" repo="${CORRAL_GITHUB_REPO:-}"
   local number="${CORRAL_GITHUB_NUMBER:-}" run_id="${CORRAL_GITHUB_RUN_ID:-}"
-  local gh_bin renderer qgh qrepo cmd
+  local gh_bin qgh qrepo cmd
   [[ -n "$repo" ]] || return 1
   gh_bin=$(command -v gh 2>/dev/null || true)
   [[ -n "$gh_bin" ]] || { printf 'corral: GitHub CLI (gh) not found\n' >&2; return 1; }
@@ -635,13 +636,13 @@ github_detail() {
   fi
   [[ -n "$bin" ]] || { github_preview; return $?; }
   case "$kind" in
-    issue) resource=issue; id=$number; view=overview ;;
-    pr) resource=pr; id=$number; view=overview ;;
-    diff) resource=pr; id=$number; view=diff ;;
-    checks) resource=pr; id=$number; view=checks ;;
-    run) resource=run; id=$run_id; view=overview ;;
-    log) resource=run; id=$run_id; view=log ;;
-    log-failed) resource=run; id=$run_id; view=log-failed ;;
+    issue) resource='issue'; id="$number"; view='overview' ;;
+    pr) resource='pr'; id="$number"; view='overview' ;;
+    diff) resource='pr'; id="$number"; view='diff' ;;
+    checks) resource='pr'; id="$number"; view='checks' ;;
+    run) resource='run'; id="$run_id"; view='overview' ;;
+    log) resource='run'; id="$run_id"; view='log' ;;
+    log-failed) resource='run'; id="$run_id"; view='log-failed' ;;
     *) return 1 ;;
   esac
   [[ "$id" =~ ^[0-9]+$ ]] || return 1
@@ -681,12 +682,13 @@ suggest_commit_message() {
     return 1
   }
   diff=${diff:0:16384}
-  local payload
+  local payload qpayload
   payload="$CORRAL_COMMIT_SUGGEST_PROMPT"$'\n\nChanged files:\n'"$files"$'\n\nGit diff:\n'"$diff"
   export CORRAL_COMMIT_SUGGEST_PROMPT CORRAL_COMMIT_FILES="$files"
-  # The second eval argument remains a literal double-quoted shell variable,
+  # Quote the generated prompt before evaluating the user-configured command,
   # so arbitrary diff contents never become shell source.
-  eval "$CORRAL_COMMIT_SUGGEST_CMD" ' "$payload"'
+  printf -v qpayload '%q' "$payload"
+  eval "$CORRAL_COMMIT_SUGGEST_CMD $qpayload"
 }
 
 # Commit the SCM panel's inline message. The TUI receives success/failure and
