@@ -113,6 +113,7 @@ corral bind delete edit-delete
 corral bind home edit-home
 corral bind end edit-end
 
+CORRAL_EDITOR="${CORRAL_EDITOR:-nvim}"
 CORRAL_EDITOR_LABEL="Corral Editor"
 CORRAL_EDITOR_TOKEN="corral-editor-owner"
 
