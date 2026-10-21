@@ -6,7 +6,55 @@ VS Code 风格左侧边栏（Rust）— Herdr 插件，也可独立运行。
 
 ## 安装
 
-系统层和 Herdr 插件**独立**，互不依赖。
+运行时（`corral`、`corral-github`）和 Herdr 插件分别安装。
+使用插件需要先安装 Herdr 0.7.0 或更新版本。
+
+### Fedora
+
+安装下载工具和默认功能使用的依赖：
+
+```bash
+sudo dnf install curl tar xz coreutils git bash jq gh neovim git-delta glib2 imv
+```
+
+在仓库目录运行二进制安装脚本：
+
+```bash
+bash scripts/install-fedora.sh
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+脚本自动选择 `x86_64` 或 `aarch64` 的最新 GitHub Release，下载后校验
+SHA-256，并安装以下文件：
+
+- `~/.local/bin/corral`
+- `~/.local/bin/corral-github`
+- `~/.local/share/herdr-corral/config.default.sh`
+
+安装到当前用户目录，无需管理员权限。把上面的 `export PATH` 加入
+`~/.zshrc`（Bash 使用 `~/.bashrc`），让新终端能够找到程序。
+脚本结束时会输出带有准确版本标签的 `herdr plugin install ... --ref ...`
+命令；执行该命令注册插件，再打开左侧 32 列 Corral：
+
+```bash
+herdr plugin action invoke corral.open
+```
+
+升级时重新运行同一脚本。也可指定目标版本进行安装、升级或回退：
+
+```bash
+bash scripts/install-fedora.sh v0.1.9
+herdr plugin install xifan2333/herdr-corral --ref v0.1.9
+```
+
+将示例中的 `v0.1.9` 替换为目标版本，使运行时和插件使用同一版本。
+升级后重新打开 Corral；已有的 `~/.config/corral/config.sh` 会保留，
+需要的新默认项可对照安装后的配置模板合并。
+使用 GitHub 功能前，运行 `gh auth login` 完成登录。
+
+脚本安装所选 Release 的发布二进制；本地源码改动按下方“开发”小节构建。
+
+### Arch Linux
 
 ```bash
 yay -S herdr-corral-bin                              # 只装二进制
@@ -14,7 +62,9 @@ herdr plugin install xifan2333/herdr-corral          # 注册插件（不编译�
 herdr plugin action invoke corral.open               # 打开左 dock
 ```
 
-也可不用 Herdr，直接跑：
+### 独立运行
+
+直接运行二进制：
 
 ```bash
 corral
@@ -33,6 +83,23 @@ corral-github issue --repo owner/repo 123
 
 依赖 [GitHub CLI](https://cli.github.com/) `gh`；图片用默认 `imv` 打开，
 可通过 `CORRAL_GITHUB_IMAGE_VIEWER` 覆盖。
+
+### 跟随 shell 目录
+
+Herdr 布局可以把一个 shell 与 Corral 侧栏绑定。shell 执行 `cd` 后，
+Corral 的文件树、SCM 和 GitHub 视图会一起切换目录；编辑器焦点变化保持该绑定。
+
+使用 `herdr pane list` 查看窗格 ID，再为 shell 上报绑定元数据。
+以下示例中 `w1:p1` 是 Corral，`w1:p3` 是 shell，替换为当前标签页的实际 ID：
+
+```bash
+herdr pane report-metadata w1:p3 --source corral-layout \
+  --token corral-shell-owner=w1:p1
+```
+
+每个侧栏绑定一个 shell。更换绑定时，先在原 shell 窗格上执行
+`herdr pane report-metadata <原窗格ID> --source corral-layout --clear-token corral-shell-owner`，
+再上报新绑定。独立运行的 Corral 使用启动目录。
 
 ### Neovim Diff 浏览
 

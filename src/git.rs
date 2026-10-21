@@ -572,7 +572,7 @@ mod tests {
         let raw = "## main\0UU conflict.rs\0";
         let s = parse_status(raw);
         assert_eq!(s.unstaged, vec![entry("conflict.rs", '!', None)]);
-        assert!(s.staged.is_empty());
+        assert_eq!(s.staged, Vec::new());
     }
 
     #[test]

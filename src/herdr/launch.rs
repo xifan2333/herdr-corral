@@ -157,6 +157,36 @@ pub fn pane_live(pane_list_json: &str, pane_id: &str) -> String {
         .unwrap_or_default()
 }
 
+/// Directory of the shell explicitly associated with this sidebar by the host layout.
+///
+/// # Errors
+/// Returns an error for an invalid host response or an unavailable shell directory.
+pub fn shell_cwd(
+    pane_list_json: &str,
+    sidebar_id: &str,
+) -> Result<Option<std::path::PathBuf>, String> {
+    let msg: PaneListMsg = serde_json::from_str(strip_bom(pane_list_json))
+        .map_err(|error| format!("invalid pane list: {error}"))?;
+    let Some(shell) = msg.result.panes.iter().find(|pane| {
+        pane.tokens
+            .get("corral-shell-owner")
+            .and_then(serde_json::Value::as_str)
+            == Some(sidebar_id)
+    }) else {
+        return Ok(None);
+    };
+    let cwd = shell
+        .cwd
+        .as_deref()
+        .filter(|cwd| !cwd.is_empty())
+        .ok_or_else(|| "shell directory is unavailable".to_string())?;
+    let path = std::path::PathBuf::from(cwd);
+    if !path.is_absolute() {
+        return Err("shell directory must be absolute".to_string());
+    }
+    Ok(Some(path))
+}
+
 /// `<pane_id>\t<cwd>` for the focused pane, or empty on invalid input.
 #[must_use]
 pub fn focused_pane(pane_list_json: &str) -> String {
@@ -313,6 +343,34 @@ mod tests {
 
     fn layout(panes: &str) -> String {
         format!(r#"{{"result":{{"layout":{{"panes":[{panes}]}}}}}}"#)
+    }
+
+    #[test]
+    fn directory_follows_the_associated_shell_instead_of_the_focused_editor() {
+        let json = pane_list(
+            r#"{"pane_id":"editor","focused":true,"cwd":"/editor"},
+               {"pane_id":"other-shell","cwd":"/other","tokens":{"corral-shell-owner":"other-sidebar"}},
+               {"pane_id":"shell","cwd":"/project/new","tokens":{"corral-shell-owner":"sidebar"}}"#,
+        );
+        assert_eq!(
+            shell_cwd(&json, "sidebar").unwrap(),
+            Some("/project/new".into())
+        );
+    }
+
+    #[test]
+    fn directory_tracking_requires_an_associated_shell() {
+        let json = pane_list(r#"{"pane_id":"shell","focused":true,"cwd":"/project"}"#);
+        assert_eq!(shell_cwd(&json, "sidebar").unwrap(), None);
+    }
+
+    #[test]
+    fn invalid_host_directories_are_reported() {
+        assert!(shell_cwd("not json", "sidebar").is_err());
+        let json = pane_list(
+            r#"{"pane_id":"shell","cwd":"relative","tokens":{"corral-shell-owner":"sidebar"}}"#,
+        );
+        assert!(shell_cwd(&json, "sidebar").is_err());
     }
 
     #[test]

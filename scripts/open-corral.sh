@@ -130,7 +130,8 @@ if ! "$herdr_bin" pane rename "$np" Corral >/dev/null 2>&1; then
 fi
 
 live=""
-for _ in $(seq 1 30); do
+deadline=$((SECONDS + 10))
+while (( SECONDS < deadline )); do
   if [ "$("$herdr_bin" pane list 2>/dev/null | "$bin" --pane-live "$np" 2>/dev/null || true)" = LIVE ]; then
     live=1
     break
@@ -138,6 +139,7 @@ for _ in $(seq 1 30); do
   sleep 0.1
 done
 if [ -z "$live" ]; then
+  printf 'corral: sidebar heartbeat timed out after 10 seconds\n' >&2
   cleanup_new
   exit 1
 fi

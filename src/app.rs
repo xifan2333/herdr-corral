@@ -26,10 +26,11 @@ use ratatui::layout::Rect;
 use ratatui::{Frame, Terminal};
 use std::io::{self, Stdout};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+const DIRECTORY_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 struct State {
     feature: Feature,
@@ -39,6 +40,10 @@ struct State {
     labeled_as: Option<&'static str>,
     last_heartbeat: Option<Instant>,
     nav_hits: Vec<(Feature, Rect)>,
+    cwd: PathBuf,
+    last_directory_poll: Option<Instant>,
+    pending_directory: Option<(PathBuf, mpsc::Receiver<Views>)>,
+    directory_error: Option<String>,
 }
 
 impl State {
@@ -50,6 +55,10 @@ impl State {
             labeled_as: None,
             last_heartbeat: None,
             nav_hits: Vec::new(),
+            cwd: ctx.cwd.clone(),
+            last_directory_poll: None,
+            pending_directory: None,
+            directory_error: None,
         }
     }
 }
@@ -60,7 +69,7 @@ impl State {
 ///
 /// Returns an [`io::Error`] if terminal setup, event reading, or shell action execution fails.
 pub fn run(ctx: &LaunchContext) -> io::Result<()> {
-    let _ = std::env::set_current_dir(&ctx.cwd);
+    std::env::set_current_dir(&ctx.cwd)?;
 
     let palette = Palette::resolve();
     let use_nf = ui::detect_nerd_font().should_use_icons();
@@ -90,6 +99,7 @@ fn event_loop(
         // refresh; expensive views rate-limit themselves.
         state.views.get_mut(state.feature).on_tick();
         sync_sidebar_heartbeat(&mut state, ctx);
+        sync_shell_directory(&mut state, ctx, use_nf)?;
         terminal.draw(|frame| {
             state.nav_hits.clear();
             draw(frame, palette, use_nf, &mut state);
@@ -150,6 +160,66 @@ fn event_loop(
             }
             _ => {}
         }
+    }
+    Ok(())
+}
+
+fn sync_shell_directory(state: &mut State, ctx: &LaunchContext, use_nf: bool) -> io::Result<()> {
+    if let Some((path, receiver)) = &state.pending_directory {
+        match receiver.try_recv() {
+            Ok(views) => {
+                match std::env::set_current_dir(path) {
+                    Ok(()) => {
+                        state.cwd = path.clone();
+                        state.views = views;
+                        state.views.get_mut(state.feature).on_activate();
+                        state.directory_error = None;
+                    }
+                    Err(error) => state.directory_error = Some(error.to_string()),
+                }
+                state.pending_directory = None;
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => {
+                return Err(io::Error::other(
+                    "directory view loader stopped unexpectedly",
+                ));
+            }
+        }
+    }
+    let (Some(bin), Some(sidebar)) = (ctx.herdr_bin(), ctx.self_pane_id()) else {
+        return Ok(());
+    };
+    if state
+        .last_directory_poll
+        .is_some_and(|last| last.elapsed() < DIRECTORY_POLL_INTERVAL)
+    {
+        return Ok(());
+    }
+    state.last_directory_poll = Some(Instant::now());
+    match herdr::cli::shell_cwd(bin, sidebar) {
+        Ok(Some(path)) => {
+            if path == state.cwd {
+                state.pending_directory = None;
+            } else if state
+                .pending_directory
+                .as_ref()
+                .is_none_or(|(pending, _)| *pending != path)
+            {
+                let (sender, receiver) = mpsc::channel();
+                let config = Arc::clone(&state.config);
+                let target = path.clone();
+                std::thread::spawn(move || {
+                    let views = Views::new(&target, use_nf, config);
+                    // A newer shell directory can supersede this load.
+                    let _ = sender.send(views);
+                });
+                state.pending_directory = Some((path, receiver));
+            }
+            state.directory_error = None;
+        }
+        Ok(None) => {}
+        Err(error) => state.directory_error = Some(error),
     }
     Ok(())
 }
@@ -277,7 +347,25 @@ fn handle_activity_click(state: &mut State, col: u16, row: u16) -> bool {
 }
 
 fn draw(frame: &mut Frame, palette: &Palette, use_nf: bool, state: &mut State) {
-    let area = frame.area();
+    let mut area = frame.area();
+    let status = state.directory_error.as_ref().map_or_else(
+        || {
+            state
+                .pending_directory
+                .as_ref()
+                .map(|(path, _)| (format!("Opening {}", path.display()), palette.subtext0))
+        },
+        |error| Some((format!("Shell directory: {error}"), palette.red)),
+    );
+    if let Some((text, color)) = status.filter(|_| area.height > 0) {
+        area.height -= 1;
+        let footer = Rect::new(area.x, area.y + area.height, area.width, 1);
+        frame.render_widget(
+            ratatui::widgets::Paragraph::new(text)
+                .style(ratatui::style::Style::default().fg(color)),
+            footer,
+        );
+    }
 
     // Transparent pane: no fill — host terminal bg shows through.
     let (activity, body) = ui::layout::split_sidebar(area);

@@ -13,6 +13,27 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub const SIDEBAR_TOKEN: &str = "corral-sidebar";
 pub const SIDEBAR_LABEL: &str = "Corral";
 
+/// Read the current directory of the layout's designated shell.
+///
+/// # Errors
+/// Returns an error when the host command or response fails.
+pub fn shell_cwd(herdr_bin: &Path, sidebar_id: &str) -> Result<Option<std::path::PathBuf>, String> {
+    let output = Command::new(herdr_bin)
+        .args(["pane", "list"])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| format!("read shell directory: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "read shell directory: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let response = std::str::from_utf8(&output.stdout)
+        .map_err(|error| format!("invalid pane response: {error}"))?;
+    super::launch::shell_cwd(response, sidebar_id)
+}
+
 /// Rename a pane's border label (what Herdr shows as the pane title).
 ///
 /// Returns `true` only when the CLI exited successfully. Missing bin/id or a
