@@ -3,7 +3,7 @@
 set -euo pipefail
 
 usage() {
-  printf 'Usage: bash scripts/install-fedora.sh [VERSION]\n'
+  printf 'Usage: bash scripts/install.sh [VERSION]\n'
   printf 'Omit VERSION for the latest release, or specify e.g. v0.1.9.\n'
 }
 

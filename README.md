@@ -9,18 +9,19 @@ VS Code 风格左侧边栏（Rust）— Herdr 插件，也可独立运行。
 运行时（`corral`、`corral-github`）和 Herdr 插件分别安装。
 使用插件需要先安装 Herdr 0.7.0 或更新版本。
 
-### Fedora
+### 通用 Linux（二进制）
 
-安装下载工具和默认功能使用的依赖：
+安装下载工具和默认功能使用的依赖（Fedora 示例；Ubuntu / Debian 等请相应调整包管理器与包名）：
 
 ```bash
+# Fedora
 sudo dnf install curl tar xz coreutils git bash jq gh neovim git-delta glib2 imv
 ```
 
 在仓库目录运行二进制安装脚本：
 
 ```bash
-bash scripts/install-fedora.sh
+bash scripts/install.sh
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
@@ -43,7 +44,7 @@ herdr plugin action invoke corral.open
 升级时重新运行同一脚本。也可指定目标版本进行安装、升级或回退：
 
 ```bash
-bash scripts/install-fedora.sh v0.1.9
+bash scripts/install.sh v0.1.9
 herdr plugin install xifan2333/herdr-corral --ref v0.1.9
 ```
 
