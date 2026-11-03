@@ -26,7 +26,7 @@ export PATH="$HOME/.local/bin:$PATH"
 指定版本安装或跳过依赖包安装：
 
 ```bash
-bash scripts/install.sh v0.1.9      # 安装指定版本
+bash scripts/install.sh v0.1.10     # 安装指定版本
 bash scripts/install.sh --no-deps   # 跳过系统包管理器依赖安装
 bash scripts/install.sh --binary    # 强制在 Arch 下使用 GitHub Release 二进制
 ```
@@ -57,7 +57,7 @@ herdr plugin install xifan2333/herdr-corral          # 注册插件（不编译�
 herdr plugin action invoke corral.open               # 打开左 dock
 ```
 
-升级时重新运行安装脚本，并更新插件（如指定版本 `--ref v0.1.9`）。
+升级时重新运行安装脚本，并更新插件（如指定版本 `--ref v0.1.10`）。
 使用 GitHub 功能前，运行 `gh auth login` 完成登录。
 
 ### 独立运行
