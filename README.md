@@ -9,59 +9,56 @@ VS Code 风格左侧边栏（Rust）— Herdr 插件，也可独立运行。
 运行时（`corral`、`corral-github`）和 Herdr 插件分别安装。
 使用插件需要先安装 Herdr 0.7.0 或更新版本。
 
-### 通用 Linux（二进制）
+### 一键安装
 
-安装下载工具和默认功能使用的依赖（Fedora 示例；Ubuntu / Debian 等请相应调整包管理器与包名）：
-
-```bash
-# Fedora
-sudo dnf install curl tar xz coreutils git bash jq gh neovim git-delta glib2 imv
-```
-
-在仓库目录运行二进制安装脚本：
+在仓库目录运行安装脚本，脚本会自动检测当前 Linux 发行版并使用对应的安装命令（Arch Linux 使用 `yay` / `paru` 安装 AUR，Fedora / Ubuntu / openSUSE 等安装对应依赖并拉取最新 Release 二进制）：
 
 ```bash
 bash scripts/install.sh
+```
+
+如果使用发布二进制安装到 `~/.local/bin`，请确保将该路径加入 `PATH`：
+
+```bash
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-脚本自动选择 `x86_64` 或 `aarch64` 的最新 GitHub Release，下载后校验
-SHA-256，并安装以下文件：
-
-- `~/.local/bin/corral`
-- `~/.local/bin/corral-github`
-- `~/.local/share/herdr-corral/config.default.sh`
-
-安装到当前用户目录，无需管理员权限。把上面的 `export PATH` 加入
-`~/.zshrc`（Bash 使用 `~/.bashrc`），让新终端能够找到程序。
-脚本结束时会输出带有准确版本标签的 `herdr plugin install ... --ref ...`
-命令；执行该命令注册插件，再打开左侧 32 列 Corral：
+指定版本安装或跳过依赖包安装：
 
 ```bash
-herdr plugin action invoke corral.open
+bash scripts/install.sh v0.1.9      # 安装指定版本
+bash scripts/install.sh --no-deps   # 跳过系统包管理器依赖安装
+bash scripts/install.sh --binary    # 强制在 Arch 下使用 GitHub Release 二进制
 ```
 
-升级时重新运行同一脚本。也可指定目标版本进行安装、升级或回退：
+### 各发行版手动安装方式
+
+- **Arch Linux**：
+  ```bash
+  yay -S herdr-corral-bin
+  ```
+- **Fedora**：
+  ```bash
+  sudo dnf install curl tar xz coreutils git bash jq gh neovim git-delta glib2 imv
+  bash scripts/install.sh
+  ```
+- **Ubuntu / Debian**：
+  ```bash
+  sudo apt-get install curl tar xz-utils coreutils git bash jq gh neovim git-delta libglib2.0-bin imv
+  bash scripts/install.sh
+  ```
+
+### 注册 Herdr 插件
+
+安装好二进制后，注册插件：
 
 ```bash
-bash scripts/install.sh v0.1.9
-herdr plugin install xifan2333/herdr-corral --ref v0.1.9
-```
-
-将示例中的 `v0.1.9` 替换为目标版本，使运行时和插件使用同一版本。
-升级后重新打开 Corral；已有的 `~/.config/corral/config.sh` 会保留，
-需要的新默认项可对照安装后的配置模板合并。
-使用 GitHub 功能前，运行 `gh auth login` 完成登录。
-
-脚本安装所选 Release 的发布二进制；本地源码改动按下方“开发”小节构建。
-
-### Arch Linux
-
-```bash
-yay -S herdr-corral-bin                              # 只装二进制
 herdr plugin install xifan2333/herdr-corral          # 注册插件（不编译）
 herdr plugin action invoke corral.open               # 打开左 dock
 ```
+
+升级时重新运行安装脚本，并更新插件（如指定版本 `--ref v0.1.9`）。
+使用 GitHub 功能前，运行 `gh auth login` 完成登录。
 
 ### 独立运行
 
