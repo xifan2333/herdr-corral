@@ -42,12 +42,26 @@ struct State {
     nav_hits: Vec<(Feature, Rect)>,
     cwd: PathBuf,
     last_directory_poll: Option<Instant>,
+    /// Socket-first shell-directory poll; created lazily with the context.
+    directory_poll: Option<herdr::DirectoryPoll>,
     pending_directory: Option<(PathBuf, mpsc::Receiver<Views>)>,
     directory_error: Option<String>,
 }
 
 impl State {
     fn new(ctx: &LaunchContext, nerd_font: bool, config: Arc<Config>) -> Self {
+        // The poll runs for the whole session, so it prefers the API socket
+        // over spawning `herdr pane list` twice a second.
+        let directory_poll = ctx
+            .herdr_bin()
+            .zip(ctx.self_pane_id())
+            .map(|(bin, sidebar)| {
+                herdr::DirectoryPoll::new(
+                    bin.to_path_buf(),
+                    sidebar.to_string(),
+                    ctx.herdr_socket().map(std::path::Path::to_path_buf),
+                )
+            });
         Self {
             feature: Feature::Explorer,
             views: Views::new(&ctx.cwd, nerd_font, Arc::clone(&config)),
@@ -57,6 +71,7 @@ impl State {
             nav_hits: Vec::new(),
             cwd: ctx.cwd.clone(),
             last_directory_poll: None,
+            directory_poll,
             pending_directory: None,
             directory_error: None,
         }
@@ -99,7 +114,7 @@ fn event_loop(
         // refresh; expensive views rate-limit themselves.
         state.views.get_mut(state.feature).on_tick();
         sync_sidebar_heartbeat(&mut state, ctx);
-        sync_shell_directory(&mut state, ctx, use_nf)?;
+        sync_shell_directory(&mut state, use_nf)?;
         terminal.draw(|frame| {
             state.nav_hits.clear();
             draw(frame, palette, use_nf, &mut state);
@@ -164,7 +179,7 @@ fn event_loop(
     Ok(())
 }
 
-fn sync_shell_directory(state: &mut State, ctx: &LaunchContext, use_nf: bool) -> io::Result<()> {
+fn sync_shell_directory(state: &mut State, use_nf: bool) -> io::Result<()> {
     if let Some((path, receiver)) = &state.pending_directory {
         match receiver.try_recv() {
             Ok(views) => {
@@ -187,7 +202,7 @@ fn sync_shell_directory(state: &mut State, ctx: &LaunchContext, use_nf: bool) ->
             }
         }
     }
-    let (Some(bin), Some(sidebar)) = (ctx.herdr_bin(), ctx.self_pane_id()) else {
+    let Some(poll) = state.directory_poll.as_ref() else {
         return Ok(());
     };
     if state
@@ -197,7 +212,7 @@ fn sync_shell_directory(state: &mut State, ctx: &LaunchContext, use_nf: bool) ->
         return Ok(());
     }
     state.last_directory_poll = Some(Instant::now());
-    match herdr::cli::shell_cwd(bin, sidebar) {
+    match poll.read() {
         Ok(Some(path)) => {
             if path == state.cwd {
                 state.pending_directory = None;

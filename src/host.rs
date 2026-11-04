@@ -56,6 +56,9 @@ pub struct LaunchContext {
     pub entrypoint_id: Option<String>,
     /// Absolute path to the Herdr binary when available (`HERDR_BIN_PATH`).
     pub herdr_bin: Option<PathBuf>,
+    /// Herdr API socket (`HERDR_SOCKET_PATH`). Preferred over spawning the
+    /// CLI for high-frequency queries such as the shell-directory poll.
+    pub herdr_socket: Option<PathBuf>,
 }
 
 impl LaunchContext {
@@ -69,6 +72,12 @@ impl LaunchContext {
     #[must_use]
     pub fn herdr_bin(&self) -> Option<&Path> {
         self.herdr_bin.as_deref()
+    }
+
+    /// Path to the Herdr API socket, if known.
+    #[must_use]
+    pub fn herdr_socket(&self) -> Option<&Path> {
+        self.herdr_socket.as_deref()
     }
 
     /// This process's pane id, if Herdr injected one.
@@ -107,6 +116,7 @@ pub fn from_env() -> LaunchContext {
     ctx.plugin_id = env_nonempty("HERDR_PLUGIN_ID");
     ctx.entrypoint_id = env_nonempty("HERDR_PLUGIN_ENTRYPOINT_ID");
     ctx.herdr_bin = env_nonempty("HERDR_BIN_PATH").map(PathBuf::from);
+    ctx.herdr_socket = env_nonempty("HERDR_SOCKET_PATH").map(PathBuf::from);
 
     // Own pane: only HERDR_PANE_ID (never the JSON focused pane).
     ctx.self_pane_id = env_nonempty("HERDR_PANE_ID");
@@ -161,5 +171,6 @@ fn parse_context(mode: Mode, json: Option<&str>, fallback_cwd: PathBuf) -> Launc
         plugin_id: None,
         entrypoint_id: None,
         herdr_bin: None,
+        herdr_socket: None,
     }
 }

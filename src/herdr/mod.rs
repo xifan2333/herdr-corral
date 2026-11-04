@@ -6,5 +6,8 @@
 
 pub mod cli;
 pub mod launch;
+pub mod rpc;
 
-pub use cli::{report_sidebar_heartbeat, set_pane_label, SIDEBAR_LABEL, SIDEBAR_TOKEN};
+pub use cli::{
+    report_sidebar_heartbeat, set_pane_label, DirectoryPoll, SIDEBAR_LABEL, SIDEBAR_TOKEN,
+};
