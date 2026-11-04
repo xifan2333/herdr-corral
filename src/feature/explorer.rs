@@ -18,14 +18,16 @@ use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
-use std::sync::mpsc::{self, Receiver, TryRecvError};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use notify::{RecursiveMode, Watcher};
 
 const NOTICE_SUCCESS_TTL: Duration = Duration::from_secs(2);
 const NOTICE_ERROR_TTL: Duration = Duration::from_secs(4);
+/// Collapse a burst of filesystem events into one tree rebuild.
+const WATCH_DEBOUNCE: Duration = Duration::from_millis(75);
 
 #[derive(Clone, Debug)]
 struct Entry {
@@ -136,19 +138,47 @@ pub struct ExplorerView {
     input: Vec<char>,
     cursor: usize,
     _watcher: Option<notify::RecommendedWatcher>,
-    watch_rx: Receiver<notify::Result<notify::Event>>,
-    watch_dirty: Option<Instant>,
+    /// Set by the watcher callback on any tree-relevant change.
+    ///
+    /// A single flag deliberately replaces an event channel: the tree only
+    /// needs to know *that* something changed and re-reads from disk on the
+    /// next debounced tick, so no queue can accumulate while another feature
+    /// is active and this view is not ticking.
+    watch_dirty: Arc<AtomicBool>,
+    /// Last watcher error (e.g. inotify watch limit reached). One slot only.
+    watch_error: Arc<Mutex<Option<String>>>,
+    /// When the pending debounce window opened; `None` when idle.
+    last_change: Option<Instant>,
     config: Arc<Config>,
 }
 
 impl ExplorerView {
     pub fn new(root: PathBuf, nerd_font: bool, config: Arc<Config>) -> Self {
         let root = root.canonicalize().unwrap_or(root);
-        let (watch_tx, watch_rx) = mpsc::channel();
+        let watch_dirty = Arc::new(AtomicBool::new(false));
+        let watch_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let mut watch_notice = None;
-        let watcher = match notify::recommended_watcher(move |event| {
-            let _ = watch_tx.send(event);
-        }) {
+        // Filter at the source. `.git` churn — including the `git status` this
+        // process itself runs on a timer — is dropped here instead of being
+        // queued for a consumer that may never run.
+        let subscriber = {
+            let filter_root = root.clone();
+            let dirty = Arc::clone(&watch_dirty);
+            let error_slot = Arc::clone(&watch_error);
+            move |event: notify::Result<notify::Event>| match event {
+                Ok(event) if watch_event_affects_tree(&filter_root, &event) => {
+                    dirty.store(true, Ordering::Release);
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    *error_slot
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        Some(error.to_string());
+                }
+            }
+        };
+        let watcher = match notify::recommended_watcher(subscriber) {
             Ok(mut watcher) => match watcher.watch(&root, RecursiveMode::Recursive) {
                 Ok(()) => Some(watcher),
                 Err(error) => {
@@ -180,8 +210,9 @@ impl ExplorerView {
             input: Vec::new(),
             cursor: 0,
             _watcher: watcher,
-            watch_rx,
-            watch_dirty: None,
+            watch_dirty,
+            watch_error,
+            last_change: None,
             config,
         };
         view.rebuild();
@@ -196,6 +227,14 @@ impl ExplorerView {
     fn clear_notice(&mut self) {
         self.notice = None;
         self.notice_at = None;
+    }
+
+    /// Take the pending watcher error, if any, out of its single slot.
+    fn take_watch_error(&self) -> Option<String> {
+        self.watch_error
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
     }
 
     fn expire_notice(&mut self) {
@@ -918,25 +957,28 @@ impl FeatureView for ExplorerView {
     }
 
     fn on_activate(&mut self) {
+        // A full rebuild already covers everything that happened while this
+        // view was inactive, so drop the flag to avoid a second rebuild.
+        self.watch_dirty.store(false, Ordering::Release);
+        self.last_change = None;
         self.rebuild();
     }
 
     fn on_tick(&mut self) {
-        loop {
-            match self.watch_rx.try_recv() {
-                Ok(Ok(event)) if watch_event_affects_tree(&self.root, &event) => {
-                    self.watch_dirty = Some(Instant::now());
-                }
-                Ok(Ok(_)) => {}
-                Ok(Err(error)) => self.set_notice(format!("watch: {error}"), true),
-                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
-            }
+        if let Some(error) = self.take_watch_error() {
+            self.set_notice(format!("watch: {error}"), true);
+        }
+        // Debounce on the first observation rather than the last: a stream of
+        // continuous churn must not starve the refresh the way a trailing-edge
+        // timer would, and one rebuild per window is the ceiling either way.
+        if self.watch_dirty.swap(false, Ordering::AcqRel) {
+            self.last_change.get_or_insert_with(Instant::now);
         }
         if self
-            .watch_dirty
-            .is_some_and(|changed| changed.elapsed() >= Duration::from_millis(75))
+            .last_change
+            .is_some_and(|changed| changed.elapsed() >= WATCH_DEBOUNCE)
         {
-            self.watch_dirty = None;
+            self.last_change = None;
             self.rebuild();
         }
         self.expire_notice();
@@ -1058,6 +1100,60 @@ mod tests {
             }
         }
         assert!(view.rows.iter().any(|entry| entry.path == external));
+
+        drop(view);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn watcher_burst_collapses_to_one_flag_not_a_queue() {
+        let root = std::env::temp_dir().join(format!(
+            "corral-watch-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let mut view = ExplorerView::new(root.clone(), false, Arc::new(Config::for_test()));
+        fs::write(root.join("burst.txt"), "x\n").unwrap();
+
+        // Wait for the real watcher to observe the create, then reset so the
+        // synthetic burst below is measured from a clean slate.
+        for _ in 0..80 {
+            if view.watch_dirty.load(Ordering::Acquire) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            view.watch_dirty.swap(false, Ordering::AcqRel),
+            "watcher never observed the new file"
+        );
+        assert!(
+            view.last_change.is_none(),
+            "debounce must not open before a tick consumes the flag"
+        );
+
+        // An arbitrary volume of callbacks between two ticks collapses into
+        // the same single flag: the view holds one bool, never a backlog of
+        // event paths. This is the regression guard against the unbounded
+        // channel that used to grow while this view was not the active one.
+        for _ in 0..100_000 {
+            view.watch_dirty.store(true, Ordering::Release);
+        }
+        view.on_tick();
+        assert!(view.last_change.is_some(), "first tick opens one window");
+
+        // Exactly one rebuild once the debounce window elapses.
+        view.last_change = Some(Instant::now().checked_sub(WATCH_DEBOUNCE).unwrap());
+        view.on_tick();
+        assert!(view.last_change.is_none());
+        assert!(view
+            .rows
+            .iter()
+            .any(|entry| entry.path == root.join("burst.txt")));
 
         drop(view);
         fs::remove_dir_all(root).unwrap();
