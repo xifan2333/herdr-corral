@@ -14,7 +14,7 @@ Options:
   -h, --help     Show this help message
 
 Version:
-  Specify a release tag (e.g. v0.1.10) or omit for the latest release.
+  Specify a release tag (e.g. v0.1.11) or omit for the latest release.
 EOF
 }
 
